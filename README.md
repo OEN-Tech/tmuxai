@@ -368,3 +368,7 @@ cargo run --example live_session  # live demo with Claude Code
 # Run the daemon
 TMUX_AI_PROFILES=profiles cargo run --bin tmux-ai-daemon
 ```
+
+## License
+
+Released under the [MIT License](LICENSE).

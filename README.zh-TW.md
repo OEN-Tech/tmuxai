@@ -188,3 +188,7 @@ TMUX_AI_PROFILES=profiles cargo run --bin tmux-ai-daemon
 - **9 個測試**全部通過
 - **13 個 commit**，從零到完整可用
 - 從 brainstorming 到實作，一個下午完成
+
+## 授權
+
+以 [MIT License](LICENSE) 釋出。
