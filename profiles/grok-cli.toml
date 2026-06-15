@@ -1,0 +1,76 @@
+[meta]
+name = "grok-cli"
+cli_command = "grok"
+banner = 'Grok Build Beta\s+[\d.]+'
+version_capture = '([\d.]+)'
+# --no-alt-screen keeps scrollback so capture-pane -S works; --always-approve =
+# YOLO; --no-memory keeps each spawn isolated. The first-run directory-picker
+# gate is disabled once globally via `hints.project_picker_disabled=true` in
+# ~/.grok/config.toml (the daemon can't dismiss an interactive gate).
+launch_command = "grok --no-alt-screen --always-approve --no-memory --effort high"
+
+[prompt]
+# Idle input box: "  │ ❯                         │"  (❯ then spaces then border).
+pattern = '^\s*│ ❯\s+│\s*$'
+# Echoed user turn in the transcript: "  ❯ <text>          9:44 PM"  (no border).
+input = '^\s*❯ (\S.*)'
+submit_keys = ["Enter"]
+
+[separator]
+pattern = '^[─━]{20,}'
+
+[markers]
+# Grok answers have NO leading glyph — bare text between "◆ Thought for …" and
+# "Turn completed in …". text_after_thinking makes the first plain line after a
+# thinking marker start the response; response_end bounds it.
+assistant_prefix = ""
+tool_use = '^\s*●\s+(Ran|Read|Wrote|Edited|Searched)\s+(.+)'
+tool_result = ''
+truncated = ''
+thinking = '^\s*◆ Thought for (.+)'
+skill_load = ''
+response_end = '^\s*Turn completed in '
+text_after_thinking = true
+
+[tasks]
+done = "✓"
+active = ""
+pending = ""
+
+[status_bar]
+# Top bar shows cwd + context tokens: "  /private/tmp   │ 30K / 512K │"
+pattern = '│\s*(\d+K) / (\d+K)\s*│'
+peak_indicator = ''
+memory = ''
+
+[question]
+choice_pattern = '^\s*([A-Z])\)\s+(.+)'
+
+[error]
+patterns = [
+    '^\s*Error:',
+    '^\s*✗',
+]
+
+[chrome]
+# Welcome box, tips, footers, menu, and the bare "Beta" tag — must never appear
+# in assistant text. (assistant_prefix is empty, so these would otherwise be
+# Unrecognized; checked last in the classifier, they can only swallow leftovers.)
+patterns = [
+    '^\s*[╭╰│┃]',
+    '^\s*Tip: ',
+    '^\s*Shift\+Tab:',
+    '^\s*Ctrl\+',
+    '^\s*Esc:',
+    '^\s*(New worktree|Resume session|Changelog|Quit)\b',
+    'Composer 2\.5 is here',
+    '^\s*Beta\s*$',
+]
+
+[exec]
+# Headless single-turn.
+command = "grok -p {prompt} --output-format json"
+output = "json"
+# jq-style dot-path into the JSON response (verified: grok -p emits {"text": "..."}).
+answer_path = ".text"
+use_stdin = false

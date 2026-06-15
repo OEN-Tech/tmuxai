@@ -1,0 +1,23 @@
+╭──────────────────────────────────────────────────────╮
+│ >_ OpenAI Codex (v0.137.0)                           │
+│                                                      │
+│ model:       gpt-5.5 xhigh   fast   /model to change │
+│ directory:   ~/Code/tmux-ai-parser                   │
+│ permissions: YOLO mode                               │
+╰──────────────────────────────────────────────────────╯
+
+  Tip: Try the Codex App. Run 'codex app' or visit https://chatgpt.com/codex
+
+⚠ MCP client for `ap2` failed to start: MCP startup failed: handshaking with MCP server failed: connection closed: initialize response
+
+⚠ MCP startup incomplete (failed: ap2)
+
+› Reply with exactly: CODEX_TUI_OK
+
+
+• CODEX_TUI_OK
+
+
+› Summarize recent commits
+
+  gpt-5.5 xhigh fast · Context 95% left · ~/Code/tmux-ai-parser · main · weekly 96% left · 258K window · 20.6K used

@@ -1,0 +1,56 @@
+#!/bin/sh
+# codex-fleet — launch the OpenAI Codex CLI with the current working directory
+# pre-trusted, so Codex's interactive "Do you trust the contents of this
+# directory?" gate never blocks a tmux-fleet worker.
+#
+# Why this exists:
+#   * The trust gate is a TUI prompt the tmux daemon CANNOT dismiss — a gated
+#     codex worker just hangs and gets reaped as "dead" (looks like a DNF).
+#   * `--dangerously-bypass-approvals-and-sandbox` bypasses APPROVALS/sandbox but
+#     NOT the directory-trust gate (verified: gate still appears).
+#   * A runtime `-c projects."<dir>".trust_level="trusted"` override does NOT
+#     satisfy the gate either (verified) — Codex only honors trust that is
+#     PERSISTED in config.toml (the gate writes your "Yes" there).
+#   * The gate checks the CANONICAL path: macOS /tmp -> /private/tmp, so trusting
+#     /tmp/x does nothing; we must trust `pwd -P`.
+#
+# So: before exec'ing codex, idempotently persist a trusted [projects."<canon>"]
+# entry for the canonical cwd. Covers ANY dir the fleet spawns into — new git
+# worktrees, fresh arenas, temp dirs — with no per-directory pre-registration.
+#
+# Concurrency: two workers spawning in the SAME dir could both append the same
+# [projects."X"] key -> duplicate TOML key -> codex refuses to start. A portable
+# mkdir-mutex serializes the check-then-append so that can't happen.
+set -eu
+
+CONFIG="${CODEX_HOME:-$HOME/.codex}/config.toml"
+LOCKDIR="$CONFIG.fleet-trust.lock.d"
+
+# Canonical cwd (resolve /tmp -> /private/tmp and any other symlinks), exactly
+# the path Codex's gate reports ("You are in <dir>").
+dir="$(pwd -P)"
+
+acquire() {
+  i=0
+  while ! mkdir "$LOCKDIR" 2>/dev/null; do
+    i=$((i + 1))
+    # ~5s ceiling, then proceed anyway rather than deadlock a worker launch
+    [ "$i" -gt 100 ] && return 0
+    sleep 0.05
+  done
+}
+release() { rmdir "$LOCKDIR" 2>/dev/null || true; }
+trap release EXIT INT TERM
+
+acquire
+mkdir -p "$(dirname "$CONFIG")"
+[ -f "$CONFIG" ] || : >"$CONFIG"
+# Idempotent: skip if this exact canonical dir is already a trusted project.
+if ! grep -qF "[projects.\"$dir\"]" "$CONFIG"; then
+  printf '\n[projects."%s"]\ntrust_level = "trusted"\n' "$dir" >>"$CONFIG"
+fi
+release
+trap - EXIT INT TERM
+
+CODEX_BIN="${CODEX_REAL_BIN:-$(command -v codex 2>/dev/null || echo /opt/homebrew/bin/codex)}"
+exec "$CODEX_BIN" "$@"

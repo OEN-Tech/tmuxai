@@ -1,0 +1,428 @@
+use serde::{Deserialize, Serialize};
+use serde_json::json;
+use std::collections::VecDeque;
+use std::path::Path;
+use std::sync::Arc;
+use std::time::Instant;
+use tokio::sync::Mutex;
+
+use crate::client;
+use crate::spawn_session;
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct TaskSpec {
+    pub id: String,
+    pub prompt: String,
+    /// Optional worker-shorthand pin ("kiro"/"gemini"/"claude"/"codex").
+    #[serde(default)]
+    pub profile: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct TaskResult {
+    id: String,
+    worker: String,
+    profile: String,
+    prompt: String,
+    text: Option<String>,
+    state: String,
+    duration_secs: f64,
+    events: serde_json::Value,
+}
+
+pub fn shorthand_to_profile(s: &str) -> Option<&'static str> {
+    match s {
+        "kiro" => Some("kiro-cli"),
+        "gemini" => Some("gemini-cli"),
+        "claude" => Some("claude-code"),
+        "codex" => Some("codex-cli"),
+        "grok" => Some("grok-cli"),
+        _ => None,
+    }
+}
+
+pub fn parse_workers(spec: &str) -> Result<Vec<(String, u32)>, String> {
+    let mut out = Vec::new();
+    for part in spec.split(',') {
+        let (name, count) = part.split_once(':').ok_or_else(|| format!("bad worker spec '{part}' (want shorthand:N)"))?;
+        let count: u32 = count.parse().map_err(|_| format!("bad worker count in '{part}'"))?;
+        if count == 0 {
+            return Err(format!("worker count must be >= 1 in '{part}'"));
+        }
+        if shorthand_to_profile(name).is_none() {
+            return Err(format!("unknown worker shorthand '{name}' (kiro|gemini|claude|codex)"));
+        }
+        out.push((name.to_string(), count));
+    }
+    Ok(out)
+}
+
+/// First task that is unpinned or pinned to this worker's shorthand.
+pub fn pick_task(queue: &mut VecDeque<TaskSpec>, shorthand: &str) -> Option<TaskSpec> {
+    let idx = queue.iter().position(|t| {
+        t.profile.as_deref().map(|p| p == shorthand).unwrap_or(true)
+    })?;
+    queue.remove(idx)
+}
+
+async fn run_one_task(worker: &str, shorthand: &str, task: &TaskSpec, timeout: u64) -> TaskResult {
+    let started = Instant::now();
+    let profile = shorthand_to_profile(shorthand).unwrap_or("?").to_string();
+    let fail = |state: &str, events: serde_json::Value, started: Instant| TaskResult {
+        id: task.id.clone(), worker: worker.to_string(), profile: profile.clone(),
+        prompt: task.prompt.clone(), text: None, state: state.to_string(),
+        duration_secs: started.elapsed().as_secs_f64(), events,
+    };
+
+    if let Err(e) = client::request(json!({"send_async": {"session": worker, "text": task.prompt}})).await {
+        return fail(&format!("error:{e}"), json!([]), started);
+    }
+
+    let mut answers = 0u32;
+    loop {
+        let remaining = timeout.saturating_sub(started.elapsed().as_secs()).max(1);
+        let resp = match client::request(json!({"wait": {"session": worker, "timeout_secs": remaining}})).await {
+            Ok(v) => v,
+            Err(e) => return fail(&format!("error:{e}"), json!([]), started),
+        };
+        let state = resp.get("state").and_then(|s| s.as_str()).unwrap_or("error").to_string();
+        let events = resp.get("events").cloned().unwrap_or_else(|| json!([]));
+        match state.as_str() {
+            "ready" => {
+                let arr = events.as_array().cloned().unwrap_or_default();
+                let text = client::last_assistant_text(&arr);
+                return TaskResult {
+                    id: task.id.clone(), worker: worker.to_string(), profile,
+                    prompt: task.prompt.clone(), text, state: "ok".into(),
+                    duration_secs: started.elapsed().as_secs_f64(), events,
+                };
+            }
+            "question" if answers < 3 => {
+                answers += 1;
+                eprintln!("[fanout] {worker}/{}: auto-answering question ({answers}/3)", task.id);
+                if let Err(e) = client::request(json!({"send_keys": {"session": worker, "keys": ["y", "Enter"]}})).await {
+                    return fail(&format!("error:{e}"), events, started);
+                }
+            }
+            "question" => return fail("failed:question_loop", events, started),
+            "timeout" => {
+                eprintln!("[fanout] {worker}/{}: timeout — interrupting", task.id);
+                let _ = client::request(json!({"interrupt": worker})).await;
+                let _ = client::request(json!({"wait": {"session": worker, "timeout_secs": 30}})).await;
+                return fail("timeout", events, started);
+            }
+            other => return fail(other, events, started),
+        }
+    }
+}
+
+/// Map a (possibly hostile) task id to a safe single-component filename so it
+/// can't escape out_dir. Non-[A-Za-z0-9._-] chars (incl. path separators) -> '_'.
+fn result_path(out_dir: &Path, id: &str) -> std::path::PathBuf {
+    let mut safe: String = id
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_' { c } else { '_' })
+        .collect();
+    if safe.is_empty() || safe == "." || safe == ".." {
+        safe = "_".to_string();
+    }
+    out_dir.join(format!("{safe}.json"))
+}
+
+async fn worker_loop(
+    worker: String,
+    shorthand: String,
+    queue: Arc<Mutex<VecDeque<TaskSpec>>>,
+    out_dir: std::path::PathBuf,
+    timeout: u64,
+) -> Vec<TaskResult> {
+    let mut results = Vec::new();
+    loop {
+        let task = { pick_task(&mut *queue.lock().await, &shorthand) };
+        let Some(task) = task else { break };
+        eprintln!("[fanout] {worker} -> {}", task.id);
+        let result = run_one_task(&worker, &shorthand, &task, timeout).await;
+
+        // Persist the result FIRST so even the respawn-failure early break
+        // below leaves a per-task file on disk.
+        let path = result_path(&out_dir, &result.id);
+        if let Ok(jsonr) = serde_json::to_string_pretty(&result) {
+            let _ = std::fs::write(&path, jsonr);
+        }
+
+        // A timed-out/dead worker gets recycled so the next task starts clean.
+        if result.state == "timeout" || result.state == "dead" {
+            eprintln!("[fanout] {worker}: recycling after {}", result.state);
+            let _ = client::request(json!({"kill_session": worker})).await;
+            let profile = shorthand_to_profile(&shorthand).unwrap_or("claude-code");
+            if let Err(e) = spawn_session(&worker, profile, None, None).await {
+                eprintln!("[fanout] {worker}: respawn failed, stopping worker: {e}");
+                results.push(result);
+                break;
+            }
+        }
+
+        results.push(result);
+    }
+    results
+}
+
+use tmux_ai_parser::profile::{CompiledExec, CompiledProfile};
+
+async fn exec_worker_loop(
+    worker: String,
+    shorthand: String,
+    profile_name: String,
+    cwd: String,
+    exec: CompiledExec,
+    queue: Arc<Mutex<VecDeque<TaskSpec>>>,
+    out_dir: std::path::PathBuf,
+    timeout: u64,
+) -> Vec<TaskResult> {
+    let mut results = Vec::new();
+    loop {
+        let task = { pick_task(&mut *queue.lock().await, &shorthand) };
+        let Some(task) = task else { break };
+        eprintln!("[fanout:exec] {worker} -> {}", task.id);
+        let started = Instant::now();
+        let r = crate::run::run_exec(&exec, &task.prompt, &cwd, timeout, false).await;
+        let state = if r.timed_out { "timeout" } else if r.ok { "ok" } else { "failed" };
+        let result = TaskResult {
+            id: task.id.clone(),
+            worker: worker.clone(),
+            profile: profile_name.clone(),
+            prompt: task.prompt.clone(),
+            text: r.answer.clone(),
+            state: state.to_string(),
+            duration_secs: started.elapsed().as_secs_f64(),
+            events: json!({"raw": r.raw, "error": r.error, "exit_code": r.exit_code}),
+        };
+        let path = result_path(&out_dir, &result.id);
+        if let Ok(j) = serde_json::to_string_pretty(&result) {
+            let _ = std::fs::write(&path, j);
+        }
+        results.push(result);
+    }
+    results
+}
+
+/// Daemon-less batch: a semaphore of N headless subprocesses per profile.
+pub async fn run_exec_mode(
+    workers_spec: &str,
+    tasks_path: &Path,
+    out_dir: &Path,
+    timeout: u64,
+    cwd: &str,
+) -> Result<serde_json::Value, String> {
+    let wall_start = Instant::now();
+    let workers = parse_workers(workers_spec)?;
+    let tasks: Vec<TaskSpec> = serde_json::from_str(
+        &std::fs::read_to_string(tasks_path).map_err(|e| format!("read {}: {e}", tasks_path.display()))?,
+    )
+    .map_err(|e| format!("parse {}: {e}", tasks_path.display()))?;
+    if tasks.is_empty() {
+        return Err("task list is empty".into());
+    }
+    std::fs::create_dir_all(out_dir).map_err(|e| format!("mkdir {}: {e}", out_dir.display()))?;
+
+    let queue = Arc::new(Mutex::new(VecDeque::from(tasks)));
+    let mut loops = tokio::task::JoinSet::new();
+    let mut worker_names: Vec<String> = Vec::new();
+    for (shorthand, count) in &workers {
+        let profile_name = shorthand_to_profile(shorthand).unwrap().to_string();
+        let path = client::profiles_dir().join(format!("{profile_name}.toml"));
+        let compiled = CompiledProfile::load(&path)?;
+        let exec = compiled
+            .exec
+            .ok_or_else(|| format!("profile '{profile_name}' has no [exec] section"))?;
+        for i in 1..=*count {
+            let worker = format!("ex-{shorthand}-{i}");
+            worker_names.push(worker.clone());
+            loops.spawn(exec_worker_loop(
+                worker,
+                shorthand.clone(),
+                profile_name.clone(),
+                cwd.to_string(),
+                exec.clone(),
+                queue.clone(),
+                out_dir.to_path_buf(),
+                timeout,
+            ));
+        }
+    }
+
+    let mut all: Vec<TaskResult> = Vec::new();
+    while let Some(joined) = loops.join_next().await {
+        all.extend(joined.map_err(|e| e.to_string())?);
+    }
+
+    // Any tasks left in the queue were pinned to a profile that no provisioned
+    // worker matched — surface them instead of silently under-executing.
+    let skipped: Vec<String> = {
+        let q = queue.lock().await;
+        q.iter().map(|t| t.id.clone()).collect()
+    };
+    if !skipped.is_empty() {
+        eprintln!(
+            "[fanout:exec] WARNING: {} task(s) never ran (profile pin matched no provisioned worker): {}",
+            skipped.len(), skipped.join(", ")
+        );
+    }
+
+    let ok = all.iter().filter(|r| r.state == "ok").count();
+    let summary = json!({
+        "total": all.len(),
+        "ok": ok,
+        "failed": all.len() - ok,
+        "wall_secs": wall_start.elapsed().as_secs_f64(),
+        "mode": "exec",
+        "workers": worker_names,
+        "skipped": skipped,
+    });
+    let body = serde_json::to_string_pretty(&summary).map_err(|e| format!("serialize summary: {e}"))?;
+    std::fs::write(out_dir.join("summary.json"), body).map_err(|e| format!("write summary: {e}"))?;
+    Ok(summary)
+}
+
+pub async fn run(
+    workers_spec: &str,
+    tasks_path: &Path,
+    out_dir: &Path,
+    timeout: u64,
+    keep: bool,
+) -> Result<serde_json::Value, String> {
+    let wall_start = Instant::now();
+    let workers = parse_workers(workers_spec)?;
+    let tasks: Vec<TaskSpec> = serde_json::from_str(
+        &std::fs::read_to_string(tasks_path).map_err(|e| format!("read {}: {e}", tasks_path.display()))?
+    ).map_err(|e| format!("parse {}: {e}", tasks_path.display()))?;
+    if tasks.is_empty() {
+        return Err("task list is empty".into());
+    }
+    std::fs::create_dir_all(out_dir).map_err(|e| format!("mkdir {}: {e}", out_dir.display()))?;
+
+    // Spawn the pool concurrently (daemon creates parallelize since the
+    // 5s startup wait runs outside the manager lock).
+    let mut names: Vec<(String, String)> = Vec::new(); // (worker, shorthand)
+    let mut spawns = tokio::task::JoinSet::new();
+    for (shorthand, count) in &workers {
+        for i in 1..=*count {
+            let worker = format!("wk-{shorthand}-{i}");
+            let profile = shorthand_to_profile(shorthand).unwrap().to_string();
+            names.push((worker.clone(), shorthand.clone()));
+            spawns.spawn(async move {
+                (worker.clone(), spawn_session(&worker, &profile, None, None).await)
+            });
+        }
+    }
+    while let Some(joined) = spawns.join_next().await {
+        let (worker, result) = joined.map_err(|e| e.to_string())?;
+        result.map_err(|e| format!("spawn {worker}: {e}"))?;
+        eprintln!("[fanout] spawned {worker}");
+    }
+
+    let queue = Arc::new(Mutex::new(VecDeque::from(tasks)));
+    let mut loops = tokio::task::JoinSet::new();
+    for (worker, shorthand) in names.clone() {
+        loops.spawn(worker_loop(worker, shorthand, queue.clone(), out_dir.to_path_buf(), timeout));
+    }
+    let mut all: Vec<TaskResult> = Vec::new();
+    while let Some(joined) = loops.join_next().await {
+        all.extend(joined.map_err(|e| e.to_string())?);
+    }
+
+    if !keep {
+        for (worker, _) in &names {
+            let _ = client::request(json!({"kill_session": worker})).await;
+        }
+    }
+
+    let ok = all.iter().filter(|r| r.state == "ok").count();
+    let sum_durations: f64 = all.iter().map(|r| r.duration_secs).sum();
+    let summary = json!({
+        "total": all.len(),
+        "ok": ok,
+        "failed": all.len() - ok,
+        "wall_secs": wall_start.elapsed().as_secs_f64(),
+        "sum_task_secs": sum_durations,
+        "workers": names.iter().map(|(w, _)| w.clone()).collect::<Vec<_>>(),
+        "kept": keep,
+    });
+    std::fs::write(out_dir.join("summary.json"), serde_json::to_string_pretty(&summary).unwrap())
+        .map_err(|e| format!("write summary: {e}"))?;
+    Ok(summary)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::VecDeque;
+    use tmux_ai_parser::profile::{CompiledExec, ExecOutput};
+
+    #[test]
+    fn parses_worker_spec() {
+        assert_eq!(
+            parse_workers("kiro:2,gemini:1").unwrap(),
+            vec![("kiro".to_string(), 2), ("gemini".to_string(), 1)]
+        );
+        assert!(parse_workers("kiro:0").is_err(), "zero workers rejected");
+        assert!(parse_workers("unknown:1").is_err(), "unknown shorthand rejected");
+    }
+
+    #[test]
+    fn maps_shorthands() {
+        assert_eq!(shorthand_to_profile("kiro"), Some("kiro-cli"));
+        assert_eq!(shorthand_to_profile("gemini"), Some("gemini-cli"));
+        assert_eq!(shorthand_to_profile("claude"), Some("claude-code"));
+        assert_eq!(shorthand_to_profile("grok"), Some("grok-cli"));
+        assert_eq!(shorthand_to_profile("codex"), Some("codex-cli"));
+        assert_eq!(shorthand_to_profile("nope"), None);
+    }
+
+    #[test]
+    fn picks_compatible_tasks() {
+        let mut q: VecDeque<TaskSpec> = VecDeque::from(vec![
+            TaskSpec { id: "t1".into(), prompt: "a".into(), profile: Some("gemini".into()) },
+            TaskSpec { id: "t2".into(), prompt: "b".into(), profile: None },
+        ]);
+        // kiro worker skips the gemini-pinned task, takes the unpinned one
+        let picked = pick_task(&mut q, "kiro").unwrap();
+        assert_eq!(picked.id, "t2");
+        // gemini worker takes its pinned task
+        let picked = pick_task(&mut q, "gemini").unwrap();
+        assert_eq!(picked.id, "t1");
+        assert!(pick_task(&mut q, "kiro").is_none());
+    }
+
+    #[tokio::test]
+    async fn exec_worker_loop_runs_and_writes_results() {
+        let dir = std::env::temp_dir().join(format!("tmuxai-exec-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let exec = CompiledExec {
+            command: "echo {prompt}".into(),
+            output: ExecOutput::Text,
+            answer_path: String::new(),
+            use_stdin: false,
+        };
+        let q = Arc::new(Mutex::new(VecDeque::from(vec![
+            TaskSpec { id: "a".into(), prompt: "AA".into(), profile: None },
+            TaskSpec { id: "b".into(), prompt: "BB".into(), profile: None },
+        ])));
+        let results = exec_worker_loop(
+            "w1".into(), "grok".into(), "grok-cli".into(), ".".to_string(), exec, q, dir.clone(), 10,
+        ).await;
+        assert_eq!(results.len(), 2);
+        assert!(dir.join("a.json").exists());
+        assert!(dir.join("b.json").exists());
+        assert!(results.iter().all(|r| r.state == "ok"));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn result_path_blocks_traversal() {
+        let p = result_path(Path::new("/out"), "../etc/passwd");
+        assert_eq!(p.parent(), Some(Path::new("/out")));
+        // Normal ids are untouched (modulo the .json suffix).
+        assert_eq!(result_path(Path::new("/out"), "task-1"), Path::new("/out/task-1.json"));
+    }
+}

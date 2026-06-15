@@ -1,0 +1,50 @@
+
+ ▝▜▄     Gemini CLI v0.46.0
+   ▝▜▄
+  ▗▟▀    Signed in with Google /auth
+ ▝▀      Plan: Google AI Ultra for Business
+
+
+ℹ You have 1 extension with an update available. Run "/extensions update superpowers".
+
+> Reply with exactly: T1_OK
+
+✦ T1_OK
+
+
+                                                                                                                                                                                        ? for shortcuts
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ auto-accept edits Shift+Tab to plan                                                                                                                       2 GEMINI.md files · 1 MCP server · 92 skills
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ >   Press 'i' for INSERT mode.
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+                                           workspace (/directory)                                  branch                                  sandbox                                               /model
+ [NORMAL]                                  ~/Code/tmux-ai-parser                                   main                                    no sandbox                                  gemini-3.5-flash
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

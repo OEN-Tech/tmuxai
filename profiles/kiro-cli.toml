@@ -1,0 +1,58 @@
+[meta]
+name = "kiro-cli"
+cli_command = "kiro-cli"
+banner = 'kiro-cli [\d.]+'
+version_capture = '([\d.]+)'
+launch_command = "kiro-cli chat --classic --trust-all-tools --model claude-opus-4.6"
+
+[prompt]
+# Kiro classic UX. 2.5.1 dropped the λ: "4% >". Legacy: "4% λ >".
+# With --trust-all-tools the prompt becomes "4% !>" (! = trust indicator).
+pattern = '^\d+% (?:λ )?!?>\s*$'
+input = '^\d+% (?:λ )?!?> (.+)'
+
+[separator]
+pattern = '^─{20,}'
+
+[markers]
+# Kiro uses > for assistant text (after the prompt line)
+assistant_prefix = "> "
+# Tool use: "I will run the following command: CMD (using tool: TOOL)"
+tool_use = '^I will run the following command: (.+) \(using tool: (\w+)\)'
+# Tool result is plain text after approval
+tool_result = '^ - Completed in (.+)'
+truncated = ''
+# No explicit thinking marker — uses spinner in terminal title
+thinking = ''
+skill_load = '^✓ (.+) loaded'
+
+[tasks]
+done = "✓"
+active = ""
+pending = ""
+
+[status_bar]
+# Status is embedded in the prompt: N% [λ] >
+# Also: ▸ Time: Ns at end of response
+pattern = '^ ▸ Time: (.+)'
+peak_indicator = ''
+memory = ''
+
+[question]
+# Permission prompt
+choice_pattern = '^\[([yntYNT])/([yntYNT])(?:/([yntYNT]))?\]'
+
+[error]
+patterns = [
+    '^Tool validation failed:',
+    '^Failed to validate',
+    '^Error:',
+]
+
+[exec]
+# kiro chat has no JSON output for responses (--format is only for --list-models),
+# so headless chat returns plain text. --trust-all-tools avoids tool-confirm prompts.
+command = "kiro-cli chat {prompt} --no-interactive --trust-all-tools --model claude-opus-4.6"
+output = "text"
+answer_path = ""
+use_stdin = false

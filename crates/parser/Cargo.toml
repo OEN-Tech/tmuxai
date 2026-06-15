@@ -1,0 +1,12 @@
+[package]
+name = "tmux-ai-parser"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+regex = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+rusqlite = { version = "0.31", features = ["bundled"] }
+humantime = "2.3.0"

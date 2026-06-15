@@ -1,0 +1,42 @@
+[meta]
+name = "claude-code"
+cli_command = "claude"
+banner = 'Claude Code v[\d.]+'
+version_capture = 'v([\d.]+)'
+launch_command = "claude --dangerously-skip-permissions"
+
+[prompt]
+pattern = '^❯\s*$'
+input = '^❯ (.+)'
+
+[separator]
+pattern = '^─{20,}'
+
+[markers]
+assistant_prefix = "⏺"
+tool_use = '^⏺ (\w+)\((.+)\)$'
+tool_result = '^\s+⎿\s+(.+)'
+truncated = '^\s+… \+(\d+) lines'
+thinking = '^[✻✶✽✷] (.+?)(?:\s+\((.+?)\))?$'
+skill_load = '^⏺ Skill\(([^)]+)\)'
+
+[tasks]
+done = "✔"
+active = "◼"
+pending = "◻"
+
+[status_bar]
+pattern = '^\s+(.+?)\s+[↓⬇](\S+)\s+[↑⬆](\S+)\s+\$(\S+)\s+\[([█░]+)\]\s+(\d+)%'
+peak_indicator = 'Off-Peak|Peak'
+memory = 'MEM:(\d+)%'
+
+[question]
+choice_pattern = '^\s*-?\s*\*?\*?([A-Z])\)?\*?\*?\s+(.+)'
+
+[error]
+patterns = [
+    '^Error:',
+    '^✗',
+    'ENOENT|EPERM|EACCES',
+    'panic|stack trace|Traceback',
+]

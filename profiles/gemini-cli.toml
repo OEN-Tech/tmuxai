@@ -1,0 +1,83 @@
+[meta]
+name = "gemini-cli"
+cli_command = "gemini"
+banner = 'Gemini CLI v[\d.]+'
+version_capture = 'v([\d.]+)'
+launch_command = "gemini -m gemini-3.5-flash --approval-mode yolo --skip-trust"
+
+[prompt]
+# Gemini uses vim-like modes.  In INSERT mode, Enter submits directly.
+# When in NORMAL mode (after a prior Escape), ensure_insert_mode presses 'i'
+# first (see [modes] below), then the text is sent, then Enter submits.
+# INSERT idle: " *   Press 'Esc' for NORMAL mode."
+# NORMAL idle: " *   Press 'i' for INSERT mode."
+pattern = '^\s+\*\s+Press'
+# The live input box renders " > text"; the echoed prompt in scrollback renders
+# "> text" (no leading space). Tolerate both so a re-appearing prompt is seen as
+# a turn boundary, not appended to the previous response as continuation text.
+input = '^\s*> (\S.*)'
+submit_keys = ["Enter"]
+
+[separator]
+pattern = '^[─▀▄]{20,}'
+
+[markers]
+# Gemini uses ✦ for assistant text
+assistant_prefix = "✦"
+# Tool use patterns (to be verified with real tool use)
+tool_use = '^⚙ (.+)'
+tool_result = ''
+truncated = ''
+thinking = '^💭 Thinking'
+skill_load = ''
+
+[tasks]
+done = "✓"
+active = ""
+pending = ""
+
+[status_bar]
+# Bottom bar: workspace, sandbox, model
+pattern = '^ \[(INSERT|NORMAL)\]\s+(.+)'
+peak_indicator = ''
+memory = ''
+
+[question]
+choice_pattern = '^\s*([A-Z])\)\s+(.+)'
+
+[error]
+patterns = [
+    '^Error:',
+    '^✗',
+]
+
+[chrome]
+# Post-response / persistent UI chrome that sits in the pane AFTER the assistant
+# reply. These must be ignored so they never get appended to the assistant text
+# as continuation (the Unrecognized->Responding-continuation rule). The first one
+# ("? for shortcuts") appears BEFORE the first separator bar, so a separator-only
+# gate can't catch it — it must be classified as chrome.
+patterns = [
+    '\? for shortcuts\s*$',
+    '^\s*auto-accept edits\b',
+    '\bGEMINI\.md files\b',
+    '^\s*workspace \(/directory\)',
+    # Vim-mode idle hint lines: the current CLI uses `*`-prefix (caught by
+    # prompt_empty), but older builds used `>`-prefix (`>   Press 'i'...`).
+    # Both are pure UI chrome and must never appear in assistant text.
+    "Press '.' for .* mode\\.?$",
+]
+
+[modes]
+# Gemini CLI vim-style modal input. After Escape+Enter submit, the TUI stays
+# in NORMAL — literal keys would be eaten as vim commands. The send path
+# checks the LAST indicator match and presses insert_key when not in INSERT.
+indicator = '\[(INSERT|NORMAL)\]'
+insert_key = "i"
+
+[exec]
+# --skip-trust: gemini headless refuses to run in an untrusted dir otherwise.
+command = "gemini -p {prompt} -m gemini-3.5-flash --approval-mode yolo --skip-trust -o json"
+output = "json"
+answer_path = ".response"
+use_stdin = false
