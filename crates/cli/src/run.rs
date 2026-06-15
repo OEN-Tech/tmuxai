@@ -73,6 +73,14 @@ pub fn extract_path(v: &serde_json::Value, path: &str) -> Option<String> {
     }
 }
 
+/// Strip raw ASCII control characters (0x00–0x1F + DEL) so a JSON payload whose
+/// string values contain unescaped control chars (e.g. grok-build's thinking
+/// trace) still parses with strict serde. Used only as PARSE input — `raw`
+/// keeps the original bytes. Multibyte (UTF-8) content is preserved.
+fn strip_control_chars(s: &str) -> String {
+    s.chars().filter(|c| !c.is_ascii_control()).collect()
+}
+
 /// Strip ANSI/CSI escape sequences (color codes, etc.) from CLI output so a
 /// text-mode answer is plain text. Manual scan — no regex dependency. Vendors
 /// that emit no escapes (e.g. codex exec) are unaffected.
@@ -127,7 +135,7 @@ pub fn normalize(
             timed_out: false,
             error: None,
         },
-        ExecOutput::Json => match serde_json::from_str::<serde_json::Value>(stdout.trim()) {
+        ExecOutput::Json => match serde_json::from_str::<serde_json::Value>(&strip_control_chars(stdout.trim())) {
             Ok(v) => match extract_path(&v, answer_path) {
                 Some(a) => RunResult {
                     ok: true,
@@ -348,6 +356,18 @@ mod tests {
         let r = normalize(&ExecOutput::Text, "", "", false, 2, "boom");
         assert!(!r.ok);
         assert_eq!(r.exit_code, 2);
+    }
+
+    #[test]
+    fn normalize_json_tolerates_raw_control_chars() {
+        // grok-build's thinking trace embeds raw control chars in string values,
+        // which strict serde rejects; we strip them before parsing.
+        let bad = "{\"text\":\"hello\",\"thought\":\"a\x01b\nc\"}";
+        let r = normalize(&ExecOutput::Json, ".text", bad, true, 0, "");
+        assert!(r.ok, "should parse after control-char strip; error: {:?}", r.error);
+        assert_eq!(r.answer.as_deref(), Some("hello"));
+        // raw is preserved (still contains the original bytes)
+        assert!(r.raw.contains("thought"));
     }
 
     #[test]

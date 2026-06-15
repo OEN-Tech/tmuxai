@@ -254,7 +254,7 @@ fn grok_launch_command_and_prefixless_flags() {
     let p = profile("grok-cli");
     assert_eq!(
         p.launch_command.as_deref(),
-        Some("grok -m grok-composer-2.5-fast --no-alt-screen --always-approve --no-memory --effort high")
+        Some("grok -m grok-build --no-alt-screen --always-approve --no-memory --effort xhigh")
     );
     assert!(p.text_after_thinking, "grok answers are prefix-less; flag must be on");
     assert!(p.response_end.is_some(), "grok needs a response_end marker");

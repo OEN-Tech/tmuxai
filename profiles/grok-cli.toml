@@ -7,7 +7,7 @@ version_capture = '([\d.]+)'
 # YOLO; --no-memory keeps each spawn isolated. The first-run directory-picker
 # gate is disabled once globally via `hints.project_picker_disabled=true` in
 # ~/.grok/config.toml (the daemon can't dismiss an interactive gate).
-launch_command = "grok -m grok-composer-2.5-fast --no-alt-screen --always-approve --no-memory --effort high"
+launch_command = "grok -m grok-build --no-alt-screen --always-approve --no-memory --effort xhigh"
 
 [prompt]
 # Idle input box: "  │ ❯                         │"  (❯ then spaces then border).
@@ -69,7 +69,7 @@ patterns = [
 
 [exec]
 # Headless single-turn.
-command = "grok -m grok-composer-2.5-fast -p {prompt} --output-format json"
+command = "grok -m grok-build --effort xhigh -p {prompt} --output-format json"
 output = "json"
 # jq-style dot-path into the JSON response (verified: grok -p emits {"text": "..."}).
 answer_path = ".text"
