@@ -3,7 +3,7 @@ name = "gemini-cli"
 cli_command = "gemini"
 banner = 'Gemini CLI v[\d.]+'
 version_capture = 'v([\d.]+)'
-launch_command = "gemini -m gemini-3.5-flash --approval-mode yolo --skip-trust"
+launch_command = "gemini -m gemini-3-flash --approval-mode yolo --skip-trust"
 
 [prompt]
 # Gemini uses vim-like modes.  In INSERT mode, Enter submits directly.
@@ -77,7 +77,7 @@ insert_key = "i"
 
 [exec]
 # --skip-trust: gemini headless refuses to run in an untrusted dir otherwise.
-command = "gemini -p {prompt} -m gemini-3.5-flash --approval-mode yolo --skip-trust -o json"
+command = "gemini -p {prompt} -m gemini-3-flash --approval-mode yolo --skip-trust -o json"
 output = "json"
 answer_path = ".response"
 use_stdin = false

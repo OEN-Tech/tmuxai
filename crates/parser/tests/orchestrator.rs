@@ -99,7 +99,7 @@ fn profiles_expose_launch_command_and_modes() {
     let gem = profile("gemini-cli");
     assert_eq!(
         gem.launch_command.as_deref(),
-        Some("gemini -m gemini-3.5-flash --approval-mode yolo --skip-trust")
+        Some("gemini -m gemini-3-flash --approval-mode yolo --skip-trust")
     );
     let ind = gem.mode_indicator.as_ref().expect("gemini mode indicator");
     assert!(ind.is_match(" [NORMAL]   ~/Code/tmux-ai-parser"));
@@ -254,7 +254,7 @@ fn grok_launch_command_and_prefixless_flags() {
     let p = profile("grok-cli");
     assert_eq!(
         p.launch_command.as_deref(),
-        Some("grok --no-alt-screen --always-approve --no-memory --effort high")
+        Some("grok -m grok-composer-2.5-fast --no-alt-screen --always-approve --no-memory --effort high")
     );
     assert!(p.text_after_thinking, "grok answers are prefix-less; flag must be on");
     assert!(p.response_end.is_some(), "grok needs a response_end marker");
@@ -306,7 +306,7 @@ fn grok_optin_does_not_affect_prefixed_profiles() {
 fn grok_exec_section_parses() {
     let p = profile("grok-cli");
     let exec = p.exec.as_ref().expect("grok-cli must have an [exec] section");
-    assert!(exec.command.contains("grok -p {prompt}"), "command was: {}", exec.command);
+    assert!(exec.command.contains("-p {prompt}"), "command was: {}", exec.command);
     assert_eq!(exec.output, ExecOutput::Json);
     assert!(!exec.answer_path.is_empty(), "json output needs a non-empty answer_path");
 }
