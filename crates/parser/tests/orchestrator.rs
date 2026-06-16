@@ -99,7 +99,7 @@ fn profiles_expose_launch_command_and_modes() {
     let gem = profile("gemini-cli");
     assert_eq!(
         gem.launch_command.as_deref(),
-        Some("gemini -m gemini-3-flash --approval-mode yolo --skip-trust")
+        Some("gemini -m gemini-3.1-pro-preview --approval-mode yolo --skip-trust")
     );
     let ind = gem.mode_indicator.as_ref().expect("gemini mode indicator");
     assert!(ind.is_match(" [NORMAL]   ~/Code/tmux-ai-parser"));
