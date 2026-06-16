@@ -96,6 +96,9 @@ enum Cmd {
         mode: String,
         #[arg(long)]
         cwd: Option<String>,
+        /// RC-2: per-task retries in exec mode on a transient failure (0 = single-shot).
+        #[arg(long, default_value_t = 2)]
+        retries: u32,
     },
     /// Run a one-shot headless prompt via the profile's [exec] mode (daemon-less).
     Run {
@@ -111,6 +114,9 @@ enum Cmd {
         json: bool,
         #[arg(long)]
         stdin: bool,
+        /// RC-2: retry up to N times on a transient failure (0 = single-shot).
+        #[arg(long, default_value_t = 2)]
+        retries: u32,
     },
 }
 
@@ -302,14 +308,14 @@ async fn main() {
             }
             Err(e) => die(&e),
         },
-        Cmd::Fanout { workers, tasks, out, timeout, keep, mode, cwd } => {
+        Cmd::Fanout { workers, tasks, out, timeout, keep, mode, cwd, retries } => {
             let result = match mode.as_str() {
                 "session" => fanout::run(&workers, &tasks, &out, timeout, keep).await,
                 "exec" => {
                     let cwd = cwd.unwrap_or_else(|| {
                         std::env::current_dir().map(|p| p.display().to_string()).unwrap_or_else(|_| ".".into())
                     });
-                    fanout::run_exec_mode(&workers, &tasks, &out, timeout, &cwd).await
+                    fanout::run_exec_mode(&workers, &tasks, &out, timeout, &cwd, retries).await
                 }
                 other => Err(format!("--mode must be 'session' or 'exec', got '{other}'")),
             };
@@ -318,7 +324,7 @@ async fn main() {
                 Err(e) => die(&e),
             }
         }
-        Cmd::Run { profile, prompt, cwd, timeout, json: as_json, stdin } => {
+        Cmd::Run { profile, prompt, cwd, timeout, json: as_json, stdin, retries } => {
             let path = client::profiles_dir().join(format!("{profile}.toml"));
             let compiled = match CompiledProfile::load(&path) {
                 Ok(c) => c,
@@ -334,7 +340,7 @@ async fn main() {
                 std::env::current_dir().map(|p| p.display().to_string()).unwrap_or_else(|_| ".".into())
             });
             let started = std::time::Instant::now();
-            let res = run::run_exec(exec, &prompt, &cwd, timeout, stdin).await;
+            let res = run::run_exec_retrying(exec, &prompt, &cwd, timeout, stdin, retries).await;
             let duration_ms = started.elapsed().as_millis() as u64;
             if as_json {
                 print_json(&json!({

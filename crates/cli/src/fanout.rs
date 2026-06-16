@@ -169,6 +169,7 @@ async fn worker_loop(
 
 use tmux_ai_parser::profile::{CompiledExec, CompiledProfile};
 
+#[allow(clippy::too_many_arguments)] // a worker's full context; a struct would only obscure it
 async fn exec_worker_loop(
     worker: String,
     shorthand: String,
@@ -178,6 +179,7 @@ async fn exec_worker_loop(
     queue: Arc<Mutex<VecDeque<TaskSpec>>>,
     out_dir: std::path::PathBuf,
     timeout: u64,
+    retries: u32,
 ) -> Vec<TaskResult> {
     let mut results = Vec::new();
     loop {
@@ -185,7 +187,7 @@ async fn exec_worker_loop(
         let Some(task) = task else { break };
         eprintln!("[fanout:exec] {worker} -> {}", task.id);
         let started = Instant::now();
-        let r = crate::run::run_exec(&exec, &task.prompt, &cwd, timeout, false).await;
+        let r = crate::run::run_exec_retrying(&exec, &task.prompt, &cwd, timeout, false, retries).await;
         let state = if r.timed_out { "timeout" } else if r.ok { "ok" } else { "failed" };
         let result = TaskResult {
             id: task.id.clone(),
@@ -213,6 +215,7 @@ pub async fn run_exec_mode(
     out_dir: &Path,
     timeout: u64,
     cwd: &str,
+    retries: u32,
 ) -> Result<serde_json::Value, String> {
     let wall_start = Instant::now();
     let workers = parse_workers(workers_spec)?;
@@ -247,6 +250,7 @@ pub async fn run_exec_mode(
                 queue.clone(),
                 out_dir.to_path_buf(),
                 timeout,
+                retries,
             ));
         }
     }
@@ -409,7 +413,7 @@ mod tests {
             TaskSpec { id: "b".into(), prompt: "BB".into(), profile: None },
         ])));
         let results = exec_worker_loop(
-            "w1".into(), "grok".into(), "grok-cli".into(), ".".to_string(), exec, q, dir.clone(), 10,
+            "w1".into(), "grok".into(), "grok-cli".into(), ".".to_string(), exec, q, dir.clone(), 10, 0,
         ).await;
         assert_eq!(results.len(), 2);
         assert!(dir.join("a.json").exists());

@@ -126,6 +126,21 @@ pub fn normalize(
             error: Some(format!("non-zero exit ({code}): {}", stderr.trim())),
         };
     }
+    // RC-3: a clean exit with empty/whitespace-only stdout is a SILENT failure
+    // (e.g. grok-build occasionally exits 0 producing nothing, or gemini's
+    // trust-downgrade returns blank). Text mode would otherwise hand back an
+    // empty answer with ok:true; classify it as a retryable failure instead so
+    // the caller never mistakes a blank for a real response.
+    if stdout.trim().is_empty() {
+        return RunResult {
+            ok: false,
+            answer: None,
+            raw: stdout.to_string(),
+            exit_code: code,
+            timed_out: false,
+            error: Some("empty output (exit 0, no stdout)".into()),
+        };
+    }
     match output {
         ExecOutput::Text => RunResult {
             ok: true,
@@ -260,6 +275,40 @@ pub async fn run_exec(
             normalize(&exec.output, &exec.answer_path, &stdout, output.status.success(), code, &stderr)
         }
     }
+}
+
+/// RC-2: retry wrapper. Run the headless command up to `1 + retries` times,
+/// retrying while the result is not ok — this absorbs the transient,
+/// non-deterministic failures the fleet actually hits: grok-build's intermittent
+/// `--single` arg error or empty exit, and an occasional gemini hang→timeout that
+/// succeeds on a second try (steady-state gemini answers in ~9s). Deterministic
+/// failures (bad answer_path, missing binary) simply exhaust the small budget,
+/// adding only a couple of fast-failing attempts. A short escalating backoff
+/// separates attempts. `retries == 0` reproduces the old single-shot behavior.
+pub async fn run_exec_retrying(
+    exec: &CompiledExec,
+    prompt: &str,
+    cwd: &str,
+    timeout_secs: u64,
+    stdin_override: bool,
+    retries: u32,
+) -> RunResult {
+    let mut last = run_exec(exec, prompt, cwd, timeout_secs, stdin_override).await;
+    let mut attempt = 0u32;
+    while !last.ok && attempt < retries {
+        let backoff = Duration::from_millis(400 * (attempt as u64 + 1));
+        eprintln!(
+            "[tmuxai] exec attempt {}/{} failed ({}); retrying in {}ms",
+            attempt + 1,
+            retries + 1,
+            last.error.as_deref().unwrap_or("?"),
+            backoff.as_millis()
+        );
+        tokio::time::sleep(backoff).await;
+        last = run_exec(exec, prompt, cwd, timeout_secs, stdin_override).await;
+        attempt += 1;
+    }
+    last
 }
 
 #[cfg(test)]
@@ -438,5 +487,72 @@ mod tests {
         }
         assert!(dead, "grandchild {gc} survived the timeout — process group not killed");
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // RC-3: a clean exit producing only whitespace is a failure, not ok:true.
+    #[test]
+    fn normalize_empty_output_is_failure() {
+        let r = normalize(&ExecOutput::Text, "", "   \n", true, 0, "");
+        assert!(!r.ok, "empty/whitespace output must be a failure");
+        assert!(r.error.unwrap().contains("empty output"));
+    }
+
+    #[tokio::test]
+    async fn run_exec_empty_stdout_is_failure() {
+        // `true` exits 0 with no stdout — previously returned ok:true with a blank answer.
+        let exec = echo_exec("true", ExecOutput::Text, "");
+        let r = run_exec(&exec, "", ".", 10, false).await;
+        assert!(!r.ok, "exit 0 + empty stdout must fail; error: {:?}", r.error);
+    }
+
+    // RC-2: a transient failure (fails twice, succeeds on the 3rd run) is
+    // absorbed by the retry budget. The counter file proves exactly 3 attempts ran.
+    #[tokio::test]
+    async fn run_exec_retrying_recovers_after_transient_failures() {
+        let dir = std::env::temp_dir().join(format!("tmuxai-retry-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let counter = dir.join("n");
+        let script = dir.join("flaky.sh");
+        std::fs::write(&counter, "0").unwrap();
+        std::fs::write(
+            &script,
+            format!(
+                "n=$(cat {c}); n=$((n+1)); echo $n > {c}; if [ $n -ge 3 ]; then echo OK; else exit 1; fi\n",
+                c = counter.display()
+            ),
+        )
+        .unwrap();
+        let exec = CompiledExec {
+            command: format!("sh {}", script.display()),
+            output: ExecOutput::Text,
+            answer_path: String::new(),
+            use_stdin: false,
+        };
+        let r = run_exec_retrying(&exec, "", ".", 10, false, 2).await;
+        assert!(r.ok, "should recover by attempt 3; error: {:?}", r.error);
+        assert_eq!(r.answer.as_deref(), Some("OK"));
+        assert_eq!(
+            std::fs::read_to_string(&counter).unwrap().trim(),
+            "3",
+            "expected exactly 3 attempts (1 + 2 retries)"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // RC-2: a deterministic failure exhausts the budget and still reports !ok.
+    #[tokio::test]
+    async fn run_exec_retrying_exhausts_then_fails() {
+        let exec = echo_exec("false", ExecOutput::Text, "");
+        let r = run_exec_retrying(&exec, "", ".", 10, false, 2).await;
+        assert!(!r.ok);
+    }
+
+    // RC-2: retries == 0 is exactly one attempt (old single-shot behavior).
+    #[tokio::test]
+    async fn run_exec_retrying_zero_is_single_shot() {
+        let exec = echo_exec("echo {prompt}", ExecOutput::Text, "");
+        let r = run_exec_retrying(&exec, "hi", ".", 10, false, 0).await;
+        assert!(r.ok);
+        assert_eq!(r.answer.as_deref(), Some("hi"));
     }
 }
