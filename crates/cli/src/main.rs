@@ -1,5 +1,6 @@
 mod client;
 mod fanout;
+mod fleet_status;
 mod run;
 mod watch;
 
@@ -117,6 +118,21 @@ enum Cmd {
         /// RC-2: retry up to N times on a transient failure (0 = single-shot).
         #[arg(long, default_value_t = 2)]
         retries: u32,
+    },
+    /// Probe each fleet member's live answerability (no vendor exposes a quota
+    /// command, so this is the closest thing): fires a trivial prompt at each and
+    /// classifies ok | rate_limited | quota_exhausted | auth_failed | timeout | down.
+    FleetStatus {
+        /// Comma-separated shorthands to probe (default: grok,gemini,codex,kiro).
+        #[arg(long)]
+        workers: Option<String>,
+        #[arg(long, default_value_t = 30)]
+        timeout: u64,
+        #[arg(long)]
+        json: bool,
+        /// The probe prompt (kept trivial/cheap).
+        #[arg(long, default_value = "Reply with the single word: OK")]
+        prompt: String,
     },
 }
 
@@ -356,6 +372,25 @@ async fn main() {
             }
             let code = if res.timed_out { 2 } else if res.ok { 0 } else { 1 };
             std::process::exit(code);
+        }
+        Cmd::FleetStatus { workers, timeout, json: as_json, prompt } => {
+            let cwd = std::env::current_dir()
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|_| ".".into());
+            match fleet_status::run(workers.as_deref(), timeout, &prompt, &cwd).await {
+                Ok(summary) => {
+                    if as_json {
+                        print_json(&summary);
+                    } else {
+                        fleet_status::render_table(&summary);
+                    }
+                    // Exit non-zero if any member is not answerable, so scripts can gate.
+                    let ok = summary.get("ok").and_then(|v| v.as_u64()).unwrap_or(0);
+                    let total = summary.get("total").and_then(|v| v.as_u64()).unwrap_or(0);
+                    std::process::exit(if ok == total { 0 } else { 1 });
+                }
+                Err(e) => die(&e),
+            }
         }
     }
 }
