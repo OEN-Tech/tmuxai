@@ -4,7 +4,10 @@ use crate::profile::CompiledProfile;
 #[derive(Debug, Clone, PartialEq)]
 pub enum LineClass {
     PromptEmpty,
-    PromptInput(String),
+    /// An echoed user prompt (`❯ …`). `indent` is the leading-whitespace width of
+    /// the `❯`, used by prefix-less CLIs to tell a WRAPPED prompt continuation
+    /// (indented deeper, under the prompt text) from the answer (at the `❯` indent).
+    PromptInput { text: String, indent: usize },
     Separator,
     AssistantText(String),
     ToolUse { tool: String, args: String },
@@ -22,8 +25,50 @@ pub enum LineClass {
     Empty,
 }
 
+/// Strip grok's right-margin scrollbar thumb: a trailing run of █ separated
+/// from the text by whitespace. Requires the leading whitespace so a contiguous
+/// block glyph attached to content (e.g. a progress bar `[████]`) is left intact.
+/// Returns the text with the trailing scrollbar (and the spaces before it)
+/// removed; a pure-scrollbar row collapses to "".
+fn strip_scrollbar(line: &str) -> &str {
+    let t = line.trim_end();
+    if !t.ends_with('█') {
+        return t;
+    }
+    // A row that is ONLY whitespace + █ (any width) is a pure scrollbar row.
+    if t.trim_end_matches('█').trim().is_empty() {
+        return "";
+    }
+    // Otherwise strip only a LONE trailing █ — the 1-column scrollbar thumb —
+    // that floats after whitespace. A MULTI-█ run is real content (a bar chart
+    // or progress bar like "A:  ████████"), and a █ glued directly to a word is
+    // content too; both are left intact. This is gap-independent, so it also
+    // strips the scrollbar off a long line where the text nearly reaches the
+    // margin (only one space before the █).
+    let body = &t[..t.len() - '█'.len_utf8()];
+    if body.ends_with('█') {
+        return t; // multi-█ run = content
+    }
+    if body.ends_with([' ', '\t']) {
+        body.trim_end()
+    } else {
+        t // █ glued to a word = content
+    }
+}
+
 pub fn classify_line(line: &str, profile: &CompiledProfile) -> LineClass {
-    let trimmed = line.trim_end();
+    // Prefix-less TUIs (grok) draw a scrollbar thumb — a run of █ block chars —
+    // at the far right margin, overlaying both blank rows AND the right edge of
+    // text rows ("…paths.<spaces>█"). Strip that trailing column so a pure
+    // scrollbar row becomes Empty and a text row isn't polluted with a trailing
+    // █. Gated on text_after_thinking (grok) and guarded to require whitespace
+    // before the █ run, so a contiguous block glyph in real content (e.g. a
+    // progress bar "[████]") is never touched.
+    let trimmed = if profile.text_after_thinking {
+        strip_scrollbar(line)
+    } else {
+        line.trim_end()
+    };
 
     if trimmed.is_empty() {
         return LineClass::Empty;
@@ -37,7 +82,10 @@ pub fn classify_line(line: &str, profile: &CompiledProfile) -> LineClass {
     // Prompt with input
     if let Some(caps) = profile.prompt_input.captures(trimmed) {
         if let Some(m) = caps.get(1) {
-            return LineClass::PromptInput(m.as_str().to_string());
+            // Leading-whitespace width of the line = the `❯` indent (the prompt
+            // marker is preceded only by spaces).
+            let indent = trimmed.len() - trimmed.trim_start().len();
+            return LineClass::PromptInput { text: m.as_str().to_string(), indent };
         }
     }
 
@@ -166,5 +214,51 @@ fn parse_token_count(s: &str) -> Option<u64> {
         s[..s.len()-1].parse::<f64>().ok().map(|v| (v * 1000.0) as u64)
     } else {
         s.parse::<u64>().ok()
+    }
+}
+
+#[cfg(test)]
+mod scrollbar_tests {
+    use super::strip_scrollbar;
+
+    #[test]
+    fn strips_trailing_thumb_after_whitespace() {
+        assert_eq!(strip_scrollbar("   exercised paths.            █"), "   exercised paths.");
+        assert_eq!(strip_scrollbar("nits.     █"), "nits.");
+    }
+
+    #[test]
+    fn pure_scrollbar_row_collapses_to_empty() {
+        assert_eq!(strip_scrollbar("                  █"), "");
+        assert_eq!(strip_scrollbar("   ██  "), "");
+    }
+
+    #[test]
+    fn multi_block_run_is_content_not_scrollbar() {
+        // Review finding G4: a bar chart / progress bar must NOT be mistaken for
+        // the scrollbar, regardless of the whitespace gap before it.
+        assert_eq!(strip_scrollbar("[████]"), "[████]");
+        assert_eq!(strip_scrollbar("progress: ████"), "progress: ████");
+        assert_eq!(strip_scrollbar("A:  ████████"), "A:  ████████");
+        assert_eq!(strip_scrollbar("x  ██"), "x  ██");
+    }
+
+    #[test]
+    fn strips_lone_thumb_even_with_small_gap() {
+        // Review finding G5: on a long line the text nearly reaches the margin, so
+        // there is only ONE space before the scrollbar █ — it must still be stripped.
+        assert_eq!(strip_scrollbar("a very long line that reaches the right edge █"),
+                   "a very long line that reaches the right edge");
+    }
+
+    #[test]
+    fn block_glued_to_word_is_kept() {
+        assert_eq!(strip_scrollbar("done█"), "done█");
+    }
+
+    #[test]
+    fn plain_line_unchanged() {
+        assert_eq!(strip_scrollbar("just normal text"), "just normal text");
+        assert_eq!(strip_scrollbar("trailing spaces   "), "trailing spaces");
     }
 }

@@ -1,0 +1,10 @@
+
+     ❯ First paragraph of the prompt that wraps onto a
+       second display line here.
+
+       Second paragraph of the prompt after a blank line.
+     ANSWER: forty-two is the result.
+     Turn completed in 1s.
+
+  │ ❯                                                    │
+  Shift+Tab:mode  │  Ctrl+.:shortcuts

@@ -5,9 +5,14 @@ pub struct Fsm {
     state: State,
     pending_text: Vec<String>,
     pending_tasks: Vec<Task>,
-    /// Profile opt-in: the first plain line after a Thinking marker starts the
-    /// response (for prefix-less CLIs like grok). Off for prefixed CLIs.
+    /// Profile opt-in: prefix-less CLIs (grok) whose answer has no leading glyph.
+    /// Enables the PromptEcho / indent-based answer anchoring below. Off for
+    /// prefixed CLIs (claude/codex/kiro/gemini).
     text_after_thinking: bool,
+    /// While in PromptEcho: the indent (leading-whitespace width) of the echoed
+    /// `❯` prompt. A continuation line indented DEEPER than this is the wrapped
+    /// prompt (consumed); a line at or shallower than this is the answer.
+    prompt_indent: usize,
 }
 
 impl Fsm {
@@ -16,7 +21,13 @@ impl Fsm {
     }
 
     pub fn with_text_after_thinking(text_after_thinking: bool) -> Self {
-        Self { state: State::Idle, pending_text: Vec::new(), pending_tasks: Vec::new(), text_after_thinking }
+        Self {
+            state: State::Idle,
+            pending_text: Vec::new(),
+            pending_tasks: Vec::new(),
+            text_after_thinking,
+            prompt_indent: 0,
+        }
     }
 
     pub fn state(&self) -> State { self.state }
@@ -31,14 +42,21 @@ impl Fsm {
                 self.transition(State::Idle, &mut events);
                 events.push(Event::Ready);
             }
-            LineClass::PromptInput(_) => {
+            LineClass::PromptInput { indent, .. } => {
                 // A prompt line (live input box or an echoed prompt in scrollback)
                 // is a turn boundary: the previous response is done. Flush it and
                 // leave Responding so the new turn's text starts a fresh block and
                 // the echoed prompt itself isn't appended as continuation.
                 self.flush_text(&mut events);
                 self.flush_tasks(&mut events);
-                if self.state == State::Responding {
+                if self.text_after_thinking {
+                    // Prefix-less CLI (grok): the echoed prompt can WRAP across
+                    // several lines AND contain blank lines. Enter PromptEcho and
+                    // remember the `❯` indent; continuation lines (indented deeper)
+                    // are consumed, the answer (at the `❯` indent) ends the echo.
+                    self.prompt_indent = indent;
+                    self.transition(State::PromptEcho, &mut events);
+                } else if self.state == State::Responding {
                     self.transition(State::Idle, &mut events);
                 }
             }
@@ -104,6 +122,10 @@ impl Fsm {
                 // in a single AssistantText. Flushing here truncated them.
                 if self.state == State::Responding {
                     self.pending_text.push(String::new());
+                } else if self.state == State::PromptEcho {
+                    // A blank line does NOT end the prompt echo — the user's own
+                    // prompt may contain blank lines. Stay in PromptEcho; only an
+                    // answer-indented line (handled in Unrecognized) ends it.
                 } else {
                     self.flush_text(&mut events);
                     self.flush_tasks(&mut events);
@@ -113,9 +135,36 @@ impl Fsm {
                 // If we're in Responding state, treat as continuation text.
                 if self.state == State::Responding {
                     self.pending_text.push(raw);
-                } else if self.text_after_thinking && self.state == State::Thinking {
-                    // Prefix-less CLI (grok): the first plain line after a
-                    // "◆ Thought for …" line IS the start of the answer.
+                } else if self.text_after_thinking && self.state == State::PromptEcho {
+                    // Prefix-less CLI (grok): we're inside the echoed prompt. A
+                    // line indented DEEPER than the `❯` is the wrapped prompt
+                    // continuation — consume (drop) it. A line at or shallower
+                    // than the `❯` indent is the ANSWER (grok renders it at the
+                    // base indent) — it ends the echo and starts the response.
+                    // This is blank-agnostic, so a prompt containing blank lines
+                    // is handled, and an answer with no preceding blank is not lost.
+                    // LIMITATION (accepted): if grok ever rendered an answer whose
+                    // FIRST line is indented deeper than the `❯` (e.g. it opens
+                    // with a code block), that line would be consumed here. Every
+                    // observed grok answer starts at the base indent, and the
+                    // worst case is the pre-fix "empty" behavior for that turn —
+                    // not a regression — so we don't buffer-and-recover for it.
+                    let raw_indent = raw.len() - raw.trim_start().len();
+                    if raw_indent > self.prompt_indent {
+                        // wrapped prompt — drop
+                    } else {
+                        self.transition(State::Responding, &mut events);
+                        self.pending_text.push(raw);
+                    }
+                } else if self.text_after_thinking
+                    && matches!(self.state, State::Thinking | State::ToolUse | State::ToolResult)
+                {
+                    // Prefix-less CLI (grok) answering after a "◆ Thought for …"
+                    // line or a tool call (no leading glyph). Anchor the response
+                    // here. The scrollbar █ column is stripped in the classifier
+                    // (never Unrecognized), so it can't leak in. NOTE: we do NOT
+                    // anchor from Idle — that would capture a pre-prompt banner as
+                    // a phantom answer; the answer is reached via PromptEcho above.
                     self.transition(State::Responding, &mut events);
                     self.pending_text.push(raw);
                 } else {

@@ -180,7 +180,7 @@ fn gemini_input_regex_matches_echo_not_idle_lines() {
 #[test]
 fn codex_launch_command_pins_gpt55_xhigh_yolo() {
     // codex launches via the codex-fleet wrapper (pre-trusts the canonical cwd so
-    // the interactive trust gate never hangs a fleet worker — see bin/codex-fleet).
+    // the interactive trust gate never hangs a fleet worker — see codex-fleet).
     let p = profile("codex-cli");
     let lc = p.launch_command.as_deref().expect("codex has a launch_command");
     assert!(lc.contains("codex-fleet"), "codex launches via codex-fleet: {lc}");
@@ -290,6 +290,82 @@ fn grok_prefixless_answer_extracted_between_thinking_and_turn_completed() {
         "thinking line must not pollute the answer"
     );
     assert!(events.iter().any(|e| matches!(e, Event::Ready)), "idle ❯ box must emit Ready");
+}
+
+#[test]
+fn grok_prefixless_answer_extracted_without_thinking_marker() {
+    // The real-world hard case: grok-build answers with NO "◆ Thought for …"
+    // marker, the echoed prompt WRAPS across lines, and a scrollbar █ column is
+    // drawn at the right margin (including a row AFTER "Turn completed"). The
+    // answer must still be extracted cleanly. Regression: previously yielded
+    // "no assistant text in current snapshot" (no anchor) — or, with a naive
+    // anchor, a spurious one-char "█" answer.
+    let mut parser = Parser::new(profile("grok-cli"));
+    let events = parser.parse_all(&fixture("grok-session-nothink.txt"));
+    let last = events.iter().rev().find_map(|e| match e {
+        Event::AssistantText { text, .. } => Some(text.clone()),
+        _ => None,
+    });
+    let last = last.unwrap_or_else(|| panic!("expected an AssistantText, got: {events:#?}"));
+    assert!(
+        last.contains("SAFE TO FLIP") && last.contains("Summary of actions performed"),
+        "grok answer (no thinking marker) must be extracted, got: {last:?}"
+    );
+    // The wrapped echoed prompt must NOT leak into the answer. (Use markers that
+    // appear ONLY in the prompt — the destination path and the instruction verb —
+    // not "Read VERIFY-BRIEF.md", which legitimately recurs in grok's summary.)
+    assert!(
+        !last.contains("verify-grok.md") && !last.contains("try to break each"),
+        "echoed/wrapped prompt leaked into the answer: {last:?}"
+    );
+    // The scrollbar block char must NOT pollute the answer, nor become a
+    // spurious one-char answer after the response flushed.
+    assert!(!last.contains('█'), "scrollbar █ leaked into the answer: {last:?}");
+    assert_ne!(last.trim(), "█", "scrollbar row became a spurious answer");
+    // Review finding G3: a pre-prompt line (the "worktree …" status banner at the
+    // top, classified Unrecognized while Idle) must NOT be captured as the answer.
+    assert!(!last.contains("worktree"), "pre-prompt banner leaked into the answer: {last:?}");
+    assert!(events.iter().any(|e| matches!(e, Event::Ready)), "idle ❯ box must emit Ready");
+}
+
+fn grok_last_text(fixture_name: &str) -> String {
+    let mut parser = Parser::new(profile("grok-cli"));
+    let events = parser.parse_all(&fixture(fixture_name));
+    events
+        .iter()
+        .rev()
+        .find_map(|e| match e {
+            Event::AssistantText { text, .. } => Some(text.clone()),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("expected an AssistantText, got: {events:#?}"))
+}
+
+#[test]
+fn grok_answer_with_no_blank_after_prompt_is_not_dropped() {
+    // Review finding G1: when the answer immediately follows the (wrapped) prompt
+    // with NO blank line between them, it must still be extracted — the answer is
+    // identified by its indent (at the `❯` column), not by a separating blank.
+    let last = grok_last_text("grok-nothink-noblank.txt");
+    assert!(last.contains("VERDICT: PASS"), "answer dropped, got: {last:?}");
+    assert!(
+        !last.contains("Reply with the verdict") && !last.contains("discussed at length"),
+        "wrapped prompt leaked into the answer: {last:?}"
+    );
+}
+
+#[test]
+fn grok_prompt_containing_a_blank_line_does_not_leak() {
+    // Review finding G2: the user's prompt itself contains a blank line. A naive
+    // "blank ends the prompt echo" rule would treat the prompt's second paragraph
+    // as the answer. Indent-based discrimination consumes the whole wrapped prompt
+    // regardless of internal blanks.
+    let last = grok_last_text("grok-prompt-internal-blank.txt");
+    assert!(last.contains("ANSWER: forty-two"), "answer not extracted, got: {last:?}");
+    assert!(
+        !last.contains("Second paragraph of the prompt") && !last.contains("First paragraph"),
+        "prompt paragraph leaked into the answer: {last:?}"
+    );
 }
 
 #[test]

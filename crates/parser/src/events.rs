@@ -11,6 +11,10 @@ pub enum State {
     Asking,
     Checklist,
     Error,
+    /// Prefix-less CLIs (grok): just saw the echoed user prompt (`❯ …`), which
+    /// can WRAP across several lines. Those continuation lines are consumed
+    /// (they are the prompt, not the answer) until a blank line ends the echo.
+    PromptEcho,
 }
 
 impl Default for State {

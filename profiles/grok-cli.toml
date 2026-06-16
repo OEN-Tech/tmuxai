@@ -66,6 +66,9 @@ patterns = [
     'Composer 2\.5 is here',
     '^\s*Beta\s*$',
 ]
+# NOTE: grok's right-margin scrollbar █ column is stripped in the classifier
+# (strip_scrollbar), not here — a chrome pattern drops the whole line, but the
+# scrollbar overlays the right edge of TEXT rows too, so the text must be kept.
 
 [exec]
 # Headless single-turn.

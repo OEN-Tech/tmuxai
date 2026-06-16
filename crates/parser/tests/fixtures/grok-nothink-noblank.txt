@@ -1,0 +1,8 @@
+
+     ❯ Reply with the verdict for the long thing we just
+       discussed at length in the brief.
+     VERDICT: PASS. The implementation is correct.
+     Turn completed in 2s.
+
+  │ ❯                                                    │
+  Shift+Tab:mode  │  Ctrl+.:shortcuts
