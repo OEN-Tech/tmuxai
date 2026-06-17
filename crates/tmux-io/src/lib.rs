@@ -96,13 +96,42 @@ impl TmuxSession {
     /// Send text input using the configured submit key sequence.
     pub async fn send(&self, input: &str) -> Result<(), String> {
         self.ensure_insert_mode().await?;
-        send_keys::send_keys_with_profile(&self.name, input, &self.submit_keys).await
+        send_keys::send_keys_with_profile(&self.name, input, &self.submit_keys).await?;
+        self.confirm_submit().await;
+        Ok(())
     }
 
     /// Send text with human-like keystroke simulation.
     pub async fn send_human(&self, input: &str, typing: &human_input::TypingProfile) -> Result<(), String> {
         self.ensure_insert_mode().await?;
-        human_input::send_keys_human(&self.name, input, &self.submit_keys, typing).await
+        human_input::send_keys_human(&self.name, input, &self.submit_keys, typing).await?;
+        self.confirm_submit().await;
+        Ok(())
+    }
+
+    /// Modal React/Ink TUIs (gemini) can DROP the submit Enter after a large
+    /// multi-line paste — the prompt is left parked in the composer, unsent (the
+    /// reported "gemini is stuck" bug). After such a send, verify the worker
+    /// actually started processing; if it hasn't, resend the submit keys a few
+    /// times. SAFE: an Enter on an empty/already-submitted composer is a no-op on
+    /// gemini (verified live), so a redundant submit can't fire a blank turn.
+    /// Gated to modal profiles (gemini) — the other CLIs submit reliably and we
+    /// don't want to send them speculative Enters.
+    async fn confirm_submit(&self) {
+        if self.mode_insert_key.is_none() {
+            return; // only gemini (the modal TUI) needs this
+        }
+        for _ in 0..3 {
+            tokio::time::sleep(Duration::from_millis(250)).await;
+            let pane = capture::capture_pane(&self.name, 12).await.unwrap_or_default();
+            if pane_is_processing(&pane) {
+                return; // accepted — the worker is busy
+            }
+            // The Enter was dropped after the paste; resend the submit keys.
+            for key in &self.submit_keys {
+                let _ = send_keys::send_raw_keys(&self.name, key).await;
+            }
+        }
     }
 
     /// Wait for output to stabilize, then capture the pane content.
@@ -189,5 +218,47 @@ impl TmuxSession {
     pub async fn interrupt(&self) -> Result<(), String> {
         send_keys::send_raw_keys(&self.name, "Escape").await?;
         send_keys::send_raw_keys(&self.name, "C-c").await
+    }
+}
+
+/// Heuristic: is the pane actively PROCESSING a turn (vs. an idle composer)?
+/// A submitted gemini turn shows a braille spinner glyph (U+2800–U+28FF) and/or
+/// an "esc to cancel|interrupt" hint; the idle composer ("Press 'Esc'/'i' …")
+/// shows neither. Used to tell a successful submit from a dropped one.
+fn pane_is_processing(pane: &str) -> bool {
+    let lower = pane.to_lowercase();
+    if lower.contains("esc to cancel") || lower.contains("esc to interrupt") {
+        return true;
+    }
+    pane.chars().any(|c| ('\u{2800}'..='\u{28ff}').contains(&c))
+}
+
+#[cfg(test)]
+mod submit_tests {
+    use super::pane_is_processing;
+
+    #[test]
+    fn idle_composer_is_not_processing() {
+        // The gemini idle composer — no spinner, no cancel hint.
+        let idle = " *   Press 'Esc' for NORMAL mode.\n [INSERT]   ~/Code   gemini-3.1-pro-preview   16% used";
+        assert!(!pane_is_processing(idle));
+    }
+
+    #[test]
+    fn spinner_glyph_is_processing() {
+        for sp in ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"] {
+            assert!(pane_is_processing(&format!("{sp} Thinking…")), "spinner {sp:?}");
+        }
+    }
+
+    #[test]
+    fn cancel_hint_is_processing() {
+        assert!(pane_is_processing("⠋ Esc to cancel"));
+        assert!(pane_is_processing("Press Esc to interrupt"));
+    }
+
+    #[test]
+    fn plain_idle_text_is_not_processing() {
+        assert!(!pane_is_processing("just some response text with no spinner"));
     }
 }
