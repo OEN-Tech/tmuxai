@@ -2,7 +2,6 @@
 name = "tmux-ai-daemon"
 version = "0.1.0"
 edition = "2021"
-license = "MIT"
 
 [dependencies]
 tokio = { version = "1", features = ["full"] }
@@ -11,3 +10,4 @@ tmux-ai-io = { path = "../tmux-io" }
 serde_json = "1"
 serde = { version = "1.0.228", features = ["derive"] }
 dirs-next = "2.0.0"
+libc = "0.2"

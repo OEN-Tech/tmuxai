@@ -709,6 +709,7 @@ name = "tmux-ai-daemon"
 version = "0.1.0"
 dependencies = [
  "dirs-next",
+ "libc",
  "serde",
  "serde_json",
  "tmux-ai-io",

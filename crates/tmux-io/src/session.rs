@@ -175,8 +175,22 @@ fn collect_descendants(roots: &[i32], children: &HashMap<i32, Vec<i32>>) -> Vec<
 }
 
 pub async fn session_exists(name: &str) -> Result<bool, String> {
-    let out = tmux(&["has-session", "-t", name]).await;
-    Ok(out.is_ok())
+    // `has-session` exits 0 ONLY when the session exists. Check the raw exit
+    // status directly — NOT via the tolerant tmux() helper, which maps BOTH a
+    // present session (exit 0) AND "no server running" (the whole server is
+    // down, so NO session exists) to Ok(""). Using `tmux().is_ok()` therefore
+    // falsely reports exists=true once the last session is killed and the server
+    // stops — which made the daemon's poll() never detect a dead session (zombie
+    // in the map). A missing session ("can't find session") and a dead server
+    // ("no server running") both correctly fail has-session → exists=false.
+    let status = Command::new("tmux")
+        .args(["has-session", "-t", name])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .await
+        .map_err(|e| format!("tmux has-session: {e}"))?;
+    Ok(status.success())
 }
 
 pub async fn list_sessions() -> Result<Vec<String>, String> {

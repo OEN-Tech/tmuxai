@@ -108,11 +108,21 @@ async fn process_command(cmd: Command, mgr: &Arc<Mutex<SessionManager>>) -> Resp
                 Ok(t) => t,
                 Err(e) => return Response::Error { error: e },
             };
-            let mut m = mgr.lock().await;
-            match m.finish_create(&args.name, tmux, &args.command, args.profile.as_deref()).await {
-                Ok(()) => Response::Ok { ok: true, session: Some(args.name) },
-                Err(e) => Response::Error { error: e },
+            let handle = {
+                let mut m = mgr.lock().await;
+                match m.finish_create(&args.name, tmux, &args.command, args.profile.as_deref()).await {
+                    Ok(()) => m.get(&args.name),
+                    Err(e) => return Response::Error { error: e },
+                }
+            };
+            // Block (manager lock released) until the CLI is actually READY before
+            // acknowledging the spawn — a slow startup/auth (gemini's OAuth ~15-20s
+            // exceeds the fixed startup wait) would otherwise let the first send
+            // land in a not-yet-ready pane and be silently lost. Best-effort; capped.
+            if let Some(h) = handle {
+                let _ = h.lock().await.wait_ready(Duration::from_secs(30)).await;
             }
+            Response::Ok { ok: true, session: Some(args.name) }
         }
         Command::SendInput { send_input: args } => {
             let sess = match session_of(mgr, &args.session).await { Ok(s) => s, Err(r) => return r };

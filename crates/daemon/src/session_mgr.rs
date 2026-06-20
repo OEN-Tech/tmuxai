@@ -141,6 +141,27 @@ impl ManagedSession {
             tokio::time::sleep(Duration::from_millis(250)).await;
         }
     }
+
+    /// Block until the freshly-spawned CLI reaches a ready/idle state (its prompt
+    /// appears) or `timeout` elapses. Some CLIs take far longer than the fixed
+    /// startup wait to become usable — notably gemini, whose OAuth handshake can
+    /// run ~15-20s; a prompt sent before then is silently lost. Best-effort:
+    /// returns the last observed state, never errors (the session still exists).
+    /// `resp_phase` is Idle at creation, so `poll` reports the raw prompt state
+    /// here, and a startup spinner / "Waiting for authentication" reads as busy.
+    pub async fn wait_ready(&mut self, timeout: Duration) -> String {
+        let start = Instant::now();
+        loop {
+            match self.poll().await {
+                Ok((state, _)) if state != "busy" => return state, // ready | question | dead
+                _ => {}
+            }
+            if start.elapsed() >= timeout {
+                return "timeout".to_string();
+            }
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+    }
 }
 
 #[cfg(test)]
