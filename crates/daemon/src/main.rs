@@ -13,6 +13,7 @@ fn acquire_single_instance_lock(path: &str) -> Result<std::fs::File, bool> {
     use std::os::unix::io::AsRawFd;
     let file = std::fs::OpenOptions::new()
         .create(true)
+        .truncate(false)
         .write(true)
         .open(path)
         .map_err(|_| false)?;

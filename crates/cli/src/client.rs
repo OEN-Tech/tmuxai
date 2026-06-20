@@ -48,40 +48,44 @@ pub async fn request(value: serde_json::Value) -> Result<serde_json::Value, Stri
 
 async fn ensure_daemon() -> Result<(), String> {
     let sock = socket_path();
-    // Single-flight: the O_EXCL lock winner spawns the daemon; losers just
-    // poll for the socket. Prevents N concurrent cold-starts (fanout pool
-    // spawn) from launching N daemons that clobber each other's socket file.
-    let lock_path = std::path::PathBuf::from(format!("{sock}.start-lock"));
-    let won = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&lock_path)
-        .is_ok();
-    if won {
-        if let Err(e) = spawn_daemon_process() {
-            let _ = std::fs::remove_file(&lock_path);
-            return Err(e);
+    // Single-flight cold-start: the lock winner spawns the daemon; losers just
+    // poll for the socket. Use an flock (auto-released on exit/crash) rather than
+    // an O_EXCL existence file — a winner that crashed mid-spawn used to leave the
+    // file behind, turning every later client into a non-winner that polls, fails
+    // with "daemon did not come up", and only then clears the stale lock (a wave
+    // of spurious failures). flock self-heals: a crashed winner's lock is released
+    // by the kernel, so the very next client wins and retries the spawn.
+    let lock_path = format!("{sock}.start-lock");
+    let lock_file = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(&lock_path).ok();
+    let won = match &lock_file {
+        Some(f) => {
+            use std::os::unix::io::AsRawFd;
+            unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) == 0 }
         }
+        None => false,
+    };
+    if won {
+        // lock_file (and its flock) stays held until this fn returns; on an early
+        // return it drops here, releasing the lock for the next client.
+        spawn_daemon_process()?;
     }
+    // Check first (the daemon may already be up), then poll.
     let mut up = false;
-    for _ in 0..20 {
-        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    for i in 0..20 {
         if UnixStream::connect(&sock).await.is_ok() {
             up = true;
             break;
         }
+        if i + 1 < 20 {
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        }
     }
-    if won {
-        let _ = std::fs::remove_file(&lock_path);
-    }
+    // `lock_file` is dropped here → flock released. No file to unlink (the anchor
+    // file is harmless to leave; the lock, not the file, is the authority).
+    drop(lock_file);
     if up {
         Ok(())
     } else {
-        if !won {
-            // The lock holder may have crashed and left a stale lock; clear it
-            // so the next invocation can attempt the spawn again.
-            let _ = std::fs::remove_file(&lock_path);
-        }
         Err(format!("daemon did not come up on {sock}"))
     }
 }

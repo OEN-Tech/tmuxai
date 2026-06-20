@@ -63,8 +63,13 @@ pub fn classify(ok: bool, timed_out: bool, answer: Option<&str>, error: Option<&
     let e = raw.to_lowercase();
 
     // Order matters: rate-limit (transient, resets) before quota (exhausted) before auth.
-    const RATE: [&str; 8] = [
-        "rate limit", "rate_limit", "ratelimit", "429", "too many requests",
+    // F9: NO bare numeric HTTP codes ("429"/"401") — they substring-match unrelated
+    // text (a path "/tmp/429.log", "exit code 1429", a request id) and misclassify
+    // a plain failure as rate_limited/auth_failed. Real rate/auth errors carry
+    // textual phrasing ("429 Too Many Requests" contains "too many requests";
+    // "401 Unauthorized" contains "unauthorized"), which these phrases still catch.
+    const RATE: [&str; 7] = [
+        "rate limit", "rate_limit", "ratelimit", "too many requests",
         "throttl", "try again later", "overloaded",
     ];
     const QUOTA: [&str; 9] = [
@@ -74,8 +79,8 @@ pub fn classify(ok: bool, timed_out: bool, answer: Option<&str>, error: Option<&
     // NB: grok ALWAYS prints a benign "Auth(AuthorizationRequired)" stderr line
     // from a secondary worker even on success — so that bare token is NOT an auth
     // signal. Require a clearer "not signed in / unauthorized / expired" phrasing.
-    const AUTH: [&str; 9] = [
-        "unauthorized", "401", "not logged in", "please log in", "please login",
+    const AUTH: [&str; 8] = [
+        "unauthorized", "not logged in", "please log in", "please login",
         "authentication failed", "sign in to", "session expired", "logged out",
     ];
 
@@ -195,7 +200,12 @@ pub async fn run(
     }
     let mut results: Vec<Value> = Vec::new();
     while let Some(joined) = set.join_next().await {
-        results.push(joined.map_err(|e| e.to_string())?);
+        // F1: a panicked probe must not abort the whole status report — skip it
+        // and still show the other members.
+        match joined {
+            Ok(v) => results.push(v),
+            Err(e) => eprintln!("[fleet-status] WARNING: a probe task panicked: {e}"),
+        }
     }
     // Stable order by the default ranking, then name.
     results.sort_by_key(|v| {
@@ -289,6 +299,20 @@ mod tests {
     fn unknown_failure_is_down() {
         let (s, _) = classify(false, false, None, Some("segfault"));
         assert_eq!(s, ProbeStatus::Down);
+    }
+
+    #[test]
+    fn bare_numeric_codes_do_not_false_positive() {
+        // F9: digits containing 429/401 in unrelated text must NOT classify as
+        // rate_limited / auth_failed — only the textual phrasing does.
+        for e in ["non-zero exit (1): wrote /tmp/429.log then crashed",
+                  "panic at frame 0x401f20", "exit code 14012"] {
+            let (s, _) = classify(false, false, None, Some(e));
+            assert_eq!(s, ProbeStatus::Down, "bare-code substring must not misclassify: {e:?}");
+        }
+        // But the real textual errors still classify correctly.
+        assert_eq!(classify(false, false, None, Some("429 Too Many Requests")).0, ProbeStatus::RateLimited);
+        assert_eq!(classify(false, false, None, Some("401 Unauthorized")).0, ProbeStatus::AuthFailed);
     }
 
     #[test]

@@ -295,7 +295,18 @@ pub async fn run_exec_retrying(
 ) -> RunResult {
     let mut last = run_exec(exec, prompt, cwd, timeout_secs, stdin_override).await;
     let mut attempt = 0u32;
+    let mut timeout_retries = 0u32;
     while !last.ok && attempt < retries {
+        // F6: a timed-out attempt re-pays the FULL `timeout_secs` on each retry.
+        // Cap timeout retries at 1 so a genuinely hung worker costs at most ~2x
+        // timeout (not (1+retries)x), while fast/transient failures (non-zero
+        // exit, empty, parse) still get the full retry budget.
+        if last.timed_out {
+            if timeout_retries >= 1 {
+                break;
+            }
+            timeout_retries += 1;
+        }
         let backoff = Duration::from_millis(400 * (attempt as u64 + 1));
         eprintln!(
             "[tmuxai] exec attempt {}/{} failed ({}); retrying in {}ms",
@@ -547,7 +558,29 @@ mod tests {
         assert!(!r.ok);
     }
 
-    // RC-2: retries == 0 is exactly one attempt (old single-shot behavior).
+    // F6: a command that always times out is retried at most ONCE (not `retries`
+    // times) — a hung worker costs ~2x timeout, not (1+retries)x. The script
+    // appends one byte then hangs; the byte count is the number of attempts.
+    #[tokio::test]
+    async fn run_exec_retrying_caps_timeout_retries() {
+        let dir = std::env::temp_dir().join(format!("tmuxai-toretry-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let counter = dir.join("n");
+        std::fs::write(&counter, "").unwrap();
+        let script = dir.join("hang.sh");
+        std::fs::write(&script, format!("printf x >> {}\nsleep 5\n", counter.display())).unwrap();
+        let exec = CompiledExec {
+            command: format!("sh {}", script.display()),
+            output: ExecOutput::Text, answer_path: String::new(), use_stdin: false,
+        };
+        // timeout 1s, retries 3 — without the cap this would attempt 4 times.
+        let r = run_exec_retrying(&exec, "", ".", 1, false, 3).await;
+        assert!(r.timed_out, "should time out");
+        let attempts = std::fs::read_to_string(&counter).unwrap().len();
+        assert_eq!(attempts, 2, "timeout retries capped at 1 (1 initial + 1 retry), got {attempts}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     #[tokio::test]
     async fn run_exec_retrying_zero_is_single_shot() {
         let exec = echo_exec("echo {prompt}", ExecOutput::Text, "");

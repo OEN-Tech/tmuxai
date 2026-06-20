@@ -126,7 +126,26 @@ fn result_path(out_dir: &Path, id: &str) -> std::path::PathBuf {
     if safe.is_empty() || safe == "." || safe == ".." {
         safe = "_".to_string();
     }
-    out_dir.join(format!("{safe}.json"))
+    // F4: sanitization is many-to-one — distinct ids ("a/b", "a:b", "a b") all map
+    // to "a_b" and would silently overwrite each other's result file. When the id
+    // had to be changed, disambiguate with a short stable hash of the ORIGINAL id.
+    // Clean ids (unchanged by sanitization) keep their plain filename.
+    if safe != id {
+        out_dir.join(format!("{safe}-{}.json", short_hash(id)))
+    } else {
+        out_dir.join(format!("{safe}.json"))
+    }
+}
+
+/// 8-hex-char stable hash (FNV-1a, folded to 32 bits) — deterministic across runs
+/// (unlike DefaultHasher), used only to disambiguate sanitized result filenames.
+fn short_hash(s: &str) -> String {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in s.bytes() {
+        h ^= b as u64;
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!("{:08x}", (h ^ (h >> 32)) as u32)
 }
 
 async fn worker_loop(
@@ -147,7 +166,12 @@ async fn worker_loop(
         // below leaves a per-task file on disk.
         let path = result_path(&out_dir, &result.id);
         if let Ok(jsonr) = serde_json::to_string_pretty(&result) {
-            let _ = std::fs::write(&path, jsonr);
+            // F3: don't silently swallow the write failure — the .json is the only
+            // home for the full text/events, and the summary would still count the
+            // task as done.
+            if let Err(e) = std::fs::write(&path, jsonr) {
+                eprintln!("[fanout] WARNING: failed to write result {}: {e}", path.display());
+            }
         }
 
         // A timed-out/dead worker gets recycled so the next task starts clean.
@@ -201,7 +225,9 @@ async fn exec_worker_loop(
         };
         let path = result_path(&out_dir, &result.id);
         if let Ok(j) = serde_json::to_string_pretty(&result) {
-            let _ = std::fs::write(&path, j);
+            if let Err(e) = std::fs::write(&path, j) {
+                eprintln!("[fanout:exec] WARNING: failed to write result {}: {e}", path.display());
+            }
         }
         results.push(result);
     }
@@ -257,7 +283,13 @@ pub async fn run_exec_mode(
 
     let mut all: Vec<TaskResult> = Vec::new();
     while let Some(joined) = loops.join_next().await {
-        all.extend(joined.map_err(|e| e.to_string())?);
+        // F1: a panicked worker must NOT abort the whole batch (which would drop
+        // every other worker's completed results and cancel in-flight workers).
+        // Log it and keep collecting the survivors.
+        match joined {
+            Ok(results) => all.extend(results),
+            Err(e) => eprintln!("[fanout:exec] WARNING: a worker task panicked; its results are lost: {e}"),
+        }
     }
 
     // Any tasks left in the queue were pinned to a profile that no provisioned
@@ -319,10 +351,21 @@ pub async fn run(
             });
         }
     }
+    let mut spawn_err: Option<String> = None;
     while let Some(joined) = spawns.join_next().await {
-        let (worker, result) = joined.map_err(|e| e.to_string())?;
-        result.map_err(|e| format!("spawn {worker}: {e}"))?;
-        eprintln!("[fanout] spawned {worker}");
+        match joined {
+            Ok((worker, Ok(_))) => eprintln!("[fanout] spawned {worker}"),
+            Ok((worker, Err(e))) => { spawn_err.get_or_insert(format!("spawn {worker}: {e}")); }
+            Err(e) => { spawn_err.get_or_insert(format!("spawn task panicked: {e}")); }
+        }
+    }
+    if let Some(e) = spawn_err {
+        // F5: if any spawn failed, kill the workers that DID come up before
+        // returning — otherwise they leak (the cleanup block below is unreached).
+        for (worker, _) in &names {
+            let _ = client::request(json!({"kill_session": worker})).await;
+        }
+        return Err(e);
     }
 
     let queue = Arc::new(Mutex::new(VecDeque::from(tasks)));
@@ -332,13 +375,30 @@ pub async fn run(
     }
     let mut all: Vec<TaskResult> = Vec::new();
     while let Some(joined) = loops.join_next().await {
-        all.extend(joined.map_err(|e| e.to_string())?);
+        // F1: a panicked worker must not abort the batch / drop other results.
+        match joined {
+            Ok(results) => all.extend(results),
+            Err(e) => eprintln!("[fanout] WARNING: a worker task panicked; its results are lost: {e}"),
+        }
     }
 
     if !keep {
         for (worker, _) in &names {
             let _ = client::request(json!({"kill_session": worker})).await;
         }
+    }
+
+    // F2: session mode, like exec mode, must report tasks left unrun (pinned to a
+    // profile no provisioned worker matched) instead of silently under-executing.
+    let skipped: Vec<String> = {
+        let q = queue.lock().await;
+        q.iter().map(|t| t.id.clone()).collect()
+    };
+    if !skipped.is_empty() {
+        eprintln!(
+            "[fanout] WARNING: {} task(s) never ran (profile pin matched no provisioned worker): {}",
+            skipped.len(), skipped.join(", ")
+        );
     }
 
     let ok = all.iter().filter(|r| r.state == "ok").count();
@@ -351,9 +411,12 @@ pub async fn run(
         "sum_task_secs": sum_durations,
         "workers": names.iter().map(|(w, _)| w.clone()).collect::<Vec<_>>(),
         "kept": keep,
+        "skipped": skipped,
     });
-    std::fs::write(out_dir.join("summary.json"), serde_json::to_string_pretty(&summary).unwrap())
-        .map_err(|e| format!("write summary: {e}"))?;
+    // F8: surface a serialize failure instead of panicking (workers already wrote
+    // their per-task files; the command should fail cleanly, not unwind).
+    let body = serde_json::to_string_pretty(&summary).map_err(|e| format!("serialize summary: {e}"))?;
+    std::fs::write(out_dir.join("summary.json"), body).map_err(|e| format!("write summary: {e}"))?;
     Ok(summary)
 }
 
@@ -428,5 +491,18 @@ mod tests {
         assert_eq!(p.parent(), Some(Path::new("/out")));
         // Normal ids are untouched (modulo the .json suffix).
         assert_eq!(result_path(Path::new("/out"), "task-1"), Path::new("/out/task-1.json"));
+    }
+
+    #[test]
+    fn result_path_disambiguates_sanitized_collisions() {
+        // F4: distinct ids that sanitize to the same name must NOT collide.
+        let a = result_path(Path::new("/out"), "a/b");
+        let b = result_path(Path::new("/out"), "a:b");
+        assert_ne!(a, b, "distinct unsafe ids must map to distinct files");
+        assert!(a.parent() == Some(Path::new("/out")) && b.parent() == Some(Path::new("/out")));
+        // A clean id collides with neither (it keeps its plain name).
+        assert_eq!(result_path(Path::new("/out"), "a_b"), Path::new("/out/a_b.json"));
+        // Stable across calls.
+        assert_eq!(result_path(Path::new("/out"), "a/b"), result_path(Path::new("/out"), "a/b"));
     }
 }
