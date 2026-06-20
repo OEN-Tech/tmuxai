@@ -391,3 +391,19 @@ fn grok_exec_section_parses() {
 fn claude_code_has_no_exec_section() {
     assert!(profile("claude-code").exec.is_none(), "claude-code has no headless exec mode");
 }
+
+#[test]
+fn deepinfra_headless_profiles_load_with_exec() {
+    for (name, model) in [
+        ("glm-cli", "zai-org/GLM-5.2"),
+        ("kimi-cli", "moonshotai/Kimi-K2.7-Code"),
+        ("deepseek-cli", "deepseek-ai/DeepSeek-V4-Pro"),
+    ] {
+        let p = profile(name);
+        let exec = p.exec.as_ref().unwrap_or_else(|| panic!("{name} must have [exec]"));
+        assert!(exec.command.contains(model), "{name} exec must target {model}: {}", exec.command);
+        assert_eq!(exec.answer_path, ".text", "{name} answer_path");
+        // headless-only: no launch_command (spawn unsupported by design)
+        assert!(p.launch_command.is_none(), "{name} must be headless-only (no launch_command)");
+    }
+}

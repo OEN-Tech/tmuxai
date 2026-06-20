@@ -1,0 +1,49 @@
+# glm-cli — headless-only fleet member: zai-org/GLM-5.2 via DeepInfra's OpenAI-compatible
+# API (a model, not a TUI). Use `tmuxai run glm-cli "..."` or `fanout --mode exec`.
+# There is intentionally NO launch_command, so session mode (`spawn`) is unsupported.
+# The session-mode sections below are required by the profile loader but unused.
+# API key: read by the wrapper from $DEEPINFRA_API_KEY or ~/.config/deepinfra/api_key
+# (never stored here).
+[meta]
+name = "glm-cli"
+cli_command = "deepinfra-chat"
+banner = 'GLM'
+version_capture = '([\d.]+)'
+
+[prompt]
+pattern = '^❯\s*$'
+input = '^❯ (.+)'
+
+[separator]
+pattern = '^─{20,}'
+
+[markers]
+assistant_prefix = ""
+tool_use = ''
+tool_result = ''
+truncated = ''
+thinking = ''
+skill_load = ''
+
+[tasks]
+done = "✓"
+active = ""
+pending = ""
+
+[status_bar]
+pattern = ''
+peak_indicator = ''
+memory = ''
+
+[question]
+choice_pattern = '^\s*([A-Z])\)\s+(.+)'
+
+[error]
+patterns = ['^Error:', '^✗']
+
+[exec]
+# Headless single-turn via the DeepInfra wrapper; prints {"text": "..."}.
+command = "deepinfra-chat --model zai-org/GLM-5.2 -p {prompt}"
+output = "json"
+answer_path = ".text"
+use_stdin = false

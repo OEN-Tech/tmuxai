@@ -15,7 +15,7 @@ use std::time::Instant;
 use tmux_ai_parser::profile::CompiledProfile;
 
 /// Members probed when `--workers` is omitted (claude-code has no [exec] section).
-const DEFAULT_WORKERS: [&str; 4] = ["grok", "gemini", "codex", "kiro"];
+const DEFAULT_WORKERS: [&str; 7] = ["grok", "gemini", "codex", "kiro", "glm", "kimi", "deepseek"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProbeStatus {
@@ -149,7 +149,7 @@ fn resolve_workers(spec: Option<&str>) -> Result<Vec<String>, String> {
     let mut profiles = Vec::new();
     for sh in shorthands {
         let name = shorthand_to_profile(&sh)
-            .ok_or_else(|| format!("unknown worker '{sh}' (grok|gemini|codex|kiro|claude)"))?;
+            .ok_or_else(|| format!("unknown worker '{sh}' (grok|gemini|codex|kiro|claude|glm|kimi|deepseek)"))?;
         profiles.push(name.to_string());
     }
     Ok(profiles)
@@ -334,7 +334,7 @@ mod tests {
     #[test]
     fn resolve_default_workers() {
         let w = resolve_workers(None).unwrap();
-        assert_eq!(w, vec!["grok-cli", "gemini-cli", "codex-cli", "kiro-cli"]);
+        assert_eq!(w, vec!["grok-cli", "gemini-cli", "codex-cli", "kiro-cli", "glm-cli", "kimi-cli", "deepseek-cli"]);
     }
 
     #[test]

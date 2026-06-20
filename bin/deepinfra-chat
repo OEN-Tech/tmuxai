@@ -1,0 +1,68 @@
+#!/usr/bin/env python3
+"""deepinfra-chat — minimal headless chat wrapper for DeepInfra's OpenAI-compatible
+API, for the tmuxai fleet's [exec] path. Prints {"text": "<answer>"} on stdout so
+a profile with answer_path = ".text" reads it (matches grok's exec format).
+
+The API key is read from $DEEPINFRA_API_KEY or ~/.config/deepinfra/api_key — it is
+NEVER hardcoded here or in any committed profile.
+"""
+import sys, os, json, argparse, urllib.request, urllib.error
+
+
+def load_key():
+    k = os.environ.get("DEEPINFRA_API_KEY")
+    if k:
+        return k.strip()
+    path = os.path.expanduser("~/.config/deepinfra/api_key")
+    try:
+        with open(path) as f:
+            return f.read().strip()
+    except OSError:
+        sys.stderr.write("deepinfra-chat: no API key ($DEEPINFRA_API_KEY or ~/.config/deepinfra/api_key)\n")
+        sys.exit(3)
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--model", required=True)
+    ap.add_argument("-p", "--prompt", default=None)
+    ap.add_argument("--max-tokens", type=int, default=8192)
+    ap.add_argument("--temperature", type=float, default=0.3)
+    ap.add_argument("--timeout", type=int, default=300)
+    args, _ = ap.parse_known_args()
+
+    prompt = args.prompt if args.prompt is not None else sys.stdin.read()
+    body = json.dumps({
+        "model": args.model,
+        "messages": [{"role": "user", "content": prompt}],
+        "max_tokens": args.max_tokens,
+        "temperature": args.temperature,
+    }).encode()
+    req = urllib.request.Request(
+        "https://api.deepinfra.com/v1/openai/chat/completions",
+        data=body,
+        headers={"Authorization": f"Bearer {load_key()}", "Content-Type": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=args.timeout) as r:
+            d = json.load(r)
+    except urllib.error.HTTPError as e:
+        sys.stderr.write(f"deepinfra-chat: HTTP {e.code}: {e.read().decode('utf-8', 'replace')[:500]}\n")
+        sys.exit(1)
+    except Exception as e:  # noqa: BLE001 — surface any transport error as a failed exec
+        sys.stderr.write(f"deepinfra-chat: {e}\n")
+        sys.exit(1)
+
+    if isinstance(d, dict) and d.get("error"):
+        sys.stderr.write(f"deepinfra-chat: api error: {json.dumps(d['error'])[:300]}\n")
+        sys.exit(1)
+    try:
+        content = d["choices"][0]["message"]["content"]
+    except (KeyError, IndexError, TypeError):
+        sys.stderr.write(f"deepinfra-chat: unexpected response: {json.dumps(d)[:300]}\n")
+        sys.exit(1)
+    sys.stdout.write(json.dumps({"text": content}))
+
+
+if __name__ == "__main__":
+    main()

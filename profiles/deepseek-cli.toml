@@ -1,0 +1,48 @@
+# deepseek-cli — headless-only fleet member: deepseek-ai/DeepSeek-V4-Pro via
+# DeepInfra's OpenAI-compatible API (a model, not a TUI). Use `tmuxai run
+# deepseek-cli "..."` or `fanout --mode exec`. No launch_command → `spawn`
+# is intentionally unsupported. Session-mode sections below are required by the
+# loader but unused. API key: read by the wrapper from $DEEPINFRA_API_KEY or
+# ~/.config/deepinfra/api_key (never stored here).
+[meta]
+name = "deepseek-cli"
+cli_command = "deepinfra-chat"
+banner = 'DeepSeek'
+version_capture = '([\d.]+)'
+
+[prompt]
+pattern = '^❯\s*$'
+input = '^❯ (.+)'
+
+[separator]
+pattern = '^─{20,}'
+
+[markers]
+assistant_prefix = ""
+tool_use = ''
+tool_result = ''
+truncated = ''
+thinking = ''
+skill_load = ''
+
+[tasks]
+done = "✓"
+active = ""
+pending = ""
+
+[status_bar]
+pattern = ''
+peak_indicator = ''
+memory = ''
+
+[question]
+choice_pattern = '^\s*([A-Z])\)\s+(.+)'
+
+[error]
+patterns = ['^Error:', '^✗']
+
+[exec]
+command = "deepinfra-chat --model deepseek-ai/DeepSeek-V4-Pro -p {prompt}"
+output = "json"
+answer_path = ".text"
+use_stdin = false

@@ -37,6 +37,9 @@ pub fn shorthand_to_profile(s: &str) -> Option<&'static str> {
         "claude" => Some("claude-code"),
         "codex" => Some("codex-cli"),
         "grok" => Some("grok-cli"),
+        "glm" => Some("glm-cli"),    // zai-org/GLM-5.2 via DeepInfra (headless-only)
+        "kimi" => Some("kimi-cli"),  // moonshotai/Kimi-K2.7-Code via DeepInfra (headless-only)
+        "deepseek" => Some("deepseek-cli"), // deepseek-ai/DeepSeek-V4-Pro via DeepInfra (headless-only)
         _ => None,
     }
 }
@@ -50,7 +53,7 @@ pub fn parse_workers(spec: &str) -> Result<Vec<(String, u32)>, String> {
             return Err(format!("worker count must be >= 1 in '{part}'"));
         }
         if shorthand_to_profile(name).is_none() {
-            return Err(format!("unknown worker shorthand '{name}' (kiro|gemini|claude|codex)"));
+            return Err(format!("unknown worker shorthand '{name}' (kiro|gemini|claude|codex|grok|glm|kimi|deepseek)"));
         }
         out.push((name.to_string(), count));
     }
